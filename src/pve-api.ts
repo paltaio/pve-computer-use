@@ -172,15 +172,47 @@ export class PveApiClient {
   }
 
   async startVm(node: string, vmid: number): Promise<string> {
-    return this.request("POST", `/nodes/${node}/qemu/${vmid}/status/start`);
+    const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/status/start`);
+    await this.waitForTask(node, upid);
+    return upid;
   }
 
   async stopVm(node: string, vmid: number): Promise<string> {
-    return this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`);
+    const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/status/stop`);
+    await this.waitForTask(node, upid);
+    return upid;
   }
 
   async shutdownVm(node: string, vmid: number): Promise<string> {
-    return this.request("POST", `/nodes/${node}/qemu/${vmid}/status/shutdown`);
+    const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/status/shutdown`);
+    await this.waitForTask(node, upid);
+    return upid;
+  }
+
+  /**
+   * Poll a PVE task until it completes. Throws with the task error if it failed.
+   */
+  async waitForTask(node: string, upid: string, timeoutMs = 60_000): Promise<void> {
+    const interval = 1000;
+    const maxAttempts = Math.ceil(timeoutMs / interval);
+
+    for (let i = 0; i < maxAttempts; i++) {
+      const task = await this.request<{ status: string; exitstatus?: string }>(
+        "GET",
+        `/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`,
+      );
+
+      if (task.status === "stopped") {
+        if (task.exitstatus && task.exitstatus !== "OK") {
+          throw new Error(`Task failed: ${task.exitstatus}`);
+        }
+        return;
+      }
+
+      await new Promise((r) => setTimeout(r, interval));
+    }
+
+    throw new Error(`Task did not complete within ${timeoutMs / 1000}s (UPID: ${upid})`);
   }
 
   /**
@@ -214,16 +246,22 @@ export class PveApiClient {
     const body: Record<string, string> = { snapname };
     if (description) body.description = description;
     if (vmstate) body.vmstate = "1";
-    return this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot`, body);
+    const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/snapshot`, body);
+    await this.waitForTask(node, upid);
+    return upid;
   }
 
   async deleteSnapshot(node: string, vmid: number, snapname: string, force?: boolean): Promise<string> {
     const query = force ? "?force=1" : "";
-    return this.request("DELETE", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}${query}`);
+    const upid = await this.request<string>("DELETE", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}${query}`);
+    await this.waitForTask(node, upid);
+    return upid;
   }
 
   async rollbackSnapshot(node: string, vmid: number, snapname: string): Promise<string> {
-    return this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`);
+    const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`);
+    await this.waitForTask(node, upid);
+    return upid;
   }
 
   // --- Backups ---
@@ -234,7 +272,9 @@ export class PveApiClient {
     if (compress) body.compress = compress;
     if (mode) body.mode = mode;
     if (notes) body["notes-template"] = notes;
-    return this.request("POST", `/nodes/${node}/vzdump`, body);
+    const upid = await this.request<string>("POST", `/nodes/${node}/vzdump`, body);
+    await this.waitForTask(node, upid, 300_000); // backups can take a while
+    return upid;
   }
 
   async listBackups(node: string, storage: string, vmid?: number): Promise<BackupVolume[]> {
