@@ -14,6 +14,12 @@ export interface VncProxyResult {
   password: string;
 }
 
+export interface TermProxyResult {
+  port: string;
+  ticket: string;
+  user: string;
+}
+
 export interface VmStatus {
   vmid: number;
   name: string;
@@ -50,13 +56,13 @@ export interface GuestExecResult {
 export class PveApiClient {
   constructor(private auth: PveAuthManager) {}
 
-  private async request<T>(method: string, path: string, body?: Record<string, string>): Promise<T> {
-    const resp = await this.doRequest(method, path, body);
+  private async request<T>(method: string, path: string, body?: Record<string, string>, extraHeaders?: Record<string, string>): Promise<T> {
+    const resp = await this.doRequest(method, path, body, extraHeaders);
 
     // On 403, force a fresh ticket and retry once — permissions may have changed
     if (resp.status === 403) {
       await this.auth.forceRefresh();
-      const retry = await this.doRequest(method, path, body);
+      const retry = await this.doRequest(method, path, body, extraHeaders);
       if (!retry.ok) {
         const text = await retry.text();
         throw new Error(`PVE API ${method} ${path} failed (${retry.status}): ${text}`);
@@ -74,7 +80,7 @@ export class PveApiClient {
     return json.data;
   }
 
-  private async doRequest(method: string, path: string, body?: Record<string, string>) {
+  private async doRequest(method: string, path: string, body?: Record<string, string>, extraHeaders?: Record<string, string>) {
     const ticket = await this.auth.getTicket();
 
     const headers: Record<string, string> = {
@@ -83,6 +89,10 @@ export class PveApiClient {
 
     if (method !== "GET") {
       headers["CSRFPreventionToken"] = ticket.csrfToken;
+    }
+
+    if (extraHeaders) {
+      Object.assign(headers, extraHeaders);
     }
 
     let reqBody: string | undefined;
@@ -115,6 +125,26 @@ export class PveApiClient {
    * The vncticket must be URL-encoded.
    */
   getVncWebSocketUrl(node: string, vmid: number, port: string, vncticket: string): string {
+    const encodedTicket = encodeURIComponent(vncticket);
+    return `wss://${this.auth.baseUrl.replace("https://", "")}/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${port}&vncticket=${encodedTicket}`;
+  }
+
+  /**
+   * Request a terminal proxy session for a QEMU VM serial console.
+   * Returns port and ticket needed for WebSocket connection.
+   */
+  async termProxy(node: string, vmid: number, serial?: string): Promise<TermProxyResult> {
+    const body: Record<string, string> | undefined = serial !== undefined ? { serial } : undefined;
+    // Referer with xtermjs=1 tells PVE to use text-mode protocol instead of VNC binary
+    const referer = `${this.auth.baseUrl}/?console=kvm&xtermjs=1&vmid=${vmid}&node=${node}`;
+    return this.request<TermProxyResult>("POST", `/nodes/${node}/qemu/${vmid}/termproxy`, body, { Referer: referer });
+  }
+
+  /**
+   * Get the WebSocket URL for terminal connection.
+   * Uses the same vncwebsocket endpoint as VNC — PVE reuses it for terminal proxy.
+   */
+  getTermWebSocketUrl(node: string, vmid: number, port: string, vncticket: string): string {
     const encodedTicket = encodeURIComponent(vncticket);
     return `wss://${this.auth.baseUrl.replace("https://", "")}/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${port}&vncticket=${encodedTicket}`;
   }
