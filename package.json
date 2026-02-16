@@ -18,6 +18,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "sharp": "^0.34.5",
     "undici": "^7.22.0",
     "ws": "^8.19.0"
