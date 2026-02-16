@@ -460,8 +460,8 @@ server.registerTool("exec_command", {
   description: "Execute a command inside the VM via QEMU guest agent. Requires qemu-guest-agent running in the VM and VM.GuestAgent.Unrestricted privilege.",
   inputSchema: {
     vmid: z.number().int().positive().describe("VM ID"),
-    command: z.string().min(1).describe("Command to execute"),
-    args: z.array(z.string()).optional().describe("Command arguments"),
+    command: z.string().min(1).describe("Command to execute (full path recommended, e.g. /usr/bin/ls). For env vars or shell features use /bin/bash -c."),
+    args: z.array(z.string()).optional().describe("Command arguments (e.g. [\"--output\", \"Virtual-1\", \"--mode\", \"1280x720\"])"),
     node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
   },
 }, async ({ vmid, command, args, node }) => {
