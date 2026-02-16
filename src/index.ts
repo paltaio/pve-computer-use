@@ -75,6 +75,11 @@ server.registerTool("screenshot", {
 }, async ({ vmid }) => {
   const id = resolveVmid(vmid);
   const session = sessions.getConnectedSession(id);
+
+  // Request a fresh full update and wait for it
+  session.requestFullUpdate();
+  await session.waitForUpdate(3000);
+
   const fb = session.screen;
   if (!fb) throw new Error("Framebuffer not ready");
 

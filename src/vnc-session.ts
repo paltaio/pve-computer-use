@@ -13,6 +13,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import type { PveApiClient } from "./pve-api.js";
+import { vncDesEncrypt } from "./des.js";
 import { Framebuffer } from "./framebuffer.js";
 import {
   RFB_ENCODING_RAW,
@@ -41,6 +42,7 @@ export interface VncSessionOptions {
 type HandshakeState =
   | "awaiting_version"
   | "awaiting_security_types"
+  | "awaiting_vnc_challenge"
   | "awaiting_security_result"
   | "awaiting_server_init"
   | "connected";
@@ -56,12 +58,19 @@ export class VncSession extends EventEmitter {
   private state: HandshakeState = "awaiting_version";
   private _connected = false;
   private supportsExtendedKey = false;
+  private vncPassword: string = "";
 
   constructor(api: PveApiClient, options: VncSessionOptions) {
     super();
     this.api = api;
     this.node = options.node;
     this.vmid = options.vmid;
+    // Prevent emit("error") from throwing when no external listener is registered.
+    // Without this, any error in handleServerMessage/handleFramebufferUpdate
+    // causes an unhandled throw that gets silently swallowed by the connect() catch.
+    this.on("error", (err: Error) => {
+      console.error(`[VNC ${this.vmid}] ${err.message}`);
+    });
   }
 
   get connected(): boolean {
@@ -75,20 +84,39 @@ export class VncSession extends EventEmitter {
   async connect(): Promise<{ width: number; height: number }> {
     // Step 1: Get VNC proxy ticket
     const proxy = await this.api.vncProxy(this.node, this.vmid);
+    this.vncPassword = proxy.password;
 
     // Step 2: Build WebSocket URL and connect (must happen within 10s)
     const wsUrl = this.api.getVncWebSocketUrl(this.node, this.vmid, proxy.port, proxy.ticket);
     const cookie = await this.api.getAuthCookie();
 
     return new Promise<{ width: number; height: number }>((resolve, reject) => {
+      let settled = false;
+
+      const fail = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      };
+
+      const succeed = (width: number, height: number) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          resolve({ width, height });
+        }
+      };
+
       const timeout = setTimeout(() => {
-        reject(new Error("VNC WebSocket connection timed out (10s)"));
+        fail(new Error("VNC WebSocket connection timed out (10s)"));
         this.ws?.close();
       }, 10000);
 
-      this.ws = new WebSocket(wsUrl, {
+      this.ws = new WebSocket(wsUrl, ["binary"], {
         headers: { Cookie: `PVEAuthCookie=${cookie}` },
-        rejectUnauthorized: false, // PVE often uses self-signed certs
+        rejectUnauthorized: false,
       });
 
       this.ws.binaryType = "arraybuffer";
@@ -99,34 +127,34 @@ export class VncSession extends EventEmitter {
       });
 
       this.ws.on("message", (data: ArrayBuffer | Buffer) => {
-        const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        this.recvBuffer = Buffer.concat([this.recvBuffer, chunk]);
-        this.processReceiveBuffer();
-
-        if (this._connected && !this.listenerCount("_init_resolve")) {
-          // Already resolved
+        try {
+          const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          this.recvBuffer = Buffer.concat([this.recvBuffer, chunk]);
+          this.processReceiveBuffer();
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          if (!settled) {
+            fail(error);
+          } else {
+            console.error(`[VNC ${this.vmid}] post-handshake error:`, error.message);
+          }
         }
       });
 
-      // Listen for handshake completion
       this.once("_init_done", (width: number, height: number) => {
-        clearTimeout(timeout);
-        resolve({ width, height });
+        succeed(width, height);
       });
 
       this.ws.on("error", (err) => {
-        clearTimeout(timeout);
-        if (!this._connected) {
-          reject(err);
-        }
+        fail(err);
         this.emit("error", err);
       });
 
       this.ws.on("close", () => {
-        clearTimeout(timeout);
+        const wasConnected = this._connected;
         this._connected = false;
-        if (!this._connected) {
-          reject(new Error("WebSocket closed before handshake completed"));
+        if (!wasConnected) {
+          fail(new Error("WebSocket closed before handshake completed"));
         }
         this.emit("close");
       });
@@ -150,6 +178,9 @@ export class VncSession extends EventEmitter {
           break;
         case "awaiting_security_types":
           progress = this.handleSecurityTypes();
+          break;
+        case "awaiting_vnc_challenge":
+          progress = this.handleVncChallenge();
           break;
         case "awaiting_security_result":
           progress = this.handleSecurityResult();
@@ -212,13 +243,32 @@ export class VncSession extends EventEmitter {
     }
     this.recvBuffer = this.recvBuffer.subarray(1 + count);
 
-    // Select type 1 (None) — PVE proxy already authenticated via ticket
-    if (!types.includes(1)) {
-      this.emit("error", new Error(`VNC security type 1 (None) not offered. Available: ${types.join(", ")}`));
+    // Prefer type 2 (VNC Authentication) which PVE uses, fall back to type 1 (None)
+    if (types.includes(2)) {
+      this.send(Buffer.from([2]));
+      this.state = "awaiting_vnc_challenge";
+    } else if (types.includes(1)) {
+      this.send(Buffer.from([1]));
+      this.state = "awaiting_security_result";
+    } else {
+      this.emit("error", new Error(`No supported VNC security type. Available: ${types.join(", ")}`));
       return false;
     }
+    return true;
+  }
 
-    this.send(Buffer.from([1]));
+  /**
+   * VNC Authentication (type 2): server sends 16-byte challenge.
+   * Client encrypts it with DES using the VNC password as key.
+   */
+  private handleVncChallenge(): boolean {
+    if (this.recvBuffer.length < 16) return false;
+
+    const challenge = Buffer.from(this.recvBuffer.subarray(0, 16));
+    this.recvBuffer = this.recvBuffer.subarray(16);
+
+    const response = vncDesEncrypt(this.vncPassword, challenge);
+    this.send(response);
     this.state = "awaiting_security_result";
     return true;
   }
@@ -351,6 +401,12 @@ export class VncSession extends EventEmitter {
           break;
         }
 
+        case RFB_ENCODING_EXTENDED_KEY: {
+          // Pseudo-encoding: server confirms Extended Key Event support
+          this.supportsExtendedKey = true;
+          break;
+        }
+
         default:
           this.emit("error", new Error(`Unsupported encoding: ${encoding}`));
           return false;
@@ -478,6 +534,30 @@ export class VncSession extends EventEmitter {
     if (this.framebuffer) {
       this.send(buildFbUpdateRequest(false, 0, 0, this.framebuffer.width, this.framebuffer.height));
     }
+  }
+
+  /**
+   * Wait for at least one framebuffer update to arrive, or timeout.
+   */
+  waitForUpdate(timeoutMs: number = 3000): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (this.framebuffer?.dirty) {
+        resolve();
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        this.removeListener("update", onUpdate);
+        resolve();
+      }, timeoutMs);
+      timer.unref();
+
+      const onUpdate = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.once("update", onUpdate);
+    });
   }
 
   /**
