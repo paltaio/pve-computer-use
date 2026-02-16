@@ -34,6 +34,19 @@ import {
   parseKeyCombo,
 } from "./rfb.js";
 
+/** Promise-based delay for animated operations. */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Supported easing curves for drag animation. */
+export type EasingType = "linear" | "ease-in" | "ease-out" | "ease-in-out";
+
+const EASING_FUNCTIONS: Record<EasingType, (t: number) => number> = {
+  "linear": (t) => t,
+  "ease-in": (t) => t * t * t,
+  "ease-out": (t) => 1 - (1 - t) ** 3,
+  "ease-in-out": (t) => t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2,
+};
+
 export interface VncSessionOptions {
   node: string;
   vmid: number;
@@ -518,13 +531,46 @@ export class VncSession extends EventEmitter {
   }
 
   /**
-   * Drag from one point to another.
+   * Drag from one point to another with animated intermediate steps.
+   *
+   * @param steps      Number of intermediate pointer events (default 20)
+   * @param durationMs Total drag duration in milliseconds (default 500)
+   * @param easing     Easing curve: "linear" | "ease-in" | "ease-out" | "ease-in-out" (default "ease-in-out")
    */
-  drag(fromX: number, fromY: number, toX: number, toY: number): void {
-    this.sendPointerEvent(0, fromX, fromY); // move to start
-    this.sendPointerEvent(1, fromX, fromY); // button down
-    this.sendPointerEvent(1, toX, toY); // move while held
-    this.sendPointerEvent(0, toX, toY); // button up
+  async drag(
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    steps: number = 20,
+    durationMs: number = 500,
+    easing: EasingType = "ease-in-out",
+  ): Promise<void> {
+    const delay = durationMs / steps;
+    const ease = EASING_FUNCTIONS[easing];
+
+    // Move to start position
+    this.sendPointerEvent(0, fromX, fromY);
+    await sleep(50);
+
+    // Press button down at start
+    this.sendPointerEvent(1, fromX, fromY);
+    await sleep(50);
+
+    // Interpolate through intermediate points with easing
+    for (let i = 1; i <= steps; i++) {
+      const t = ease(i / steps);
+      const x = Math.round(fromX + (toX - fromX) * t);
+      const y = Math.round(fromY + (toY - fromY) * t);
+      this.sendPointerEvent(1, x, y);
+      await sleep(delay);
+    }
+
+    // Small pause before release so the target registers the drop
+    await sleep(50);
+
+    // Release button at destination
+    this.sendPointerEvent(0, toX, toY);
   }
 
   /**
