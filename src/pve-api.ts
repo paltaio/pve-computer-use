@@ -22,6 +22,24 @@ export interface VmStatus {
   type: string;
 }
 
+export interface Snapshot {
+  name: string;
+  description?: string;
+  snaptime?: number;
+  vmstate?: boolean;
+  parent?: string;
+}
+
+export interface BackupVolume {
+  volid: string;
+  size: number;
+  ctime: number;
+  format: string;
+  vmid?: number;
+  notes?: string;
+  protected?: boolean;
+}
+
 export interface GuestExecResult {
   exitcode: number;
   stdout: string;
@@ -33,6 +51,30 @@ export class PveApiClient {
   constructor(private auth: PveAuthManager) {}
 
   private async request<T>(method: string, path: string, body?: Record<string, string>): Promise<T> {
+    const resp = await this.doRequest(method, path, body);
+
+    // On 403, force a fresh ticket and retry once — permissions may have changed
+    if (resp.status === 403) {
+      await this.auth.forceRefresh();
+      const retry = await this.doRequest(method, path, body);
+      if (!retry.ok) {
+        const text = await retry.text();
+        throw new Error(`PVE API ${method} ${path} failed (${retry.status}): ${text}`);
+      }
+      const json = (await retry.json()) as { data: T };
+      return json.data;
+    }
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`PVE API ${method} ${path} failed (${resp.status}): ${text}`);
+    }
+
+    const json = (await resp.json()) as { data: T };
+    return json.data;
+  }
+
+  private async doRequest(method: string, path: string, body?: Record<string, string>) {
     const ticket = await this.auth.getTicket();
 
     const headers: Record<string, string> = {
@@ -49,20 +91,12 @@ export class PveApiClient {
       reqBody = new URLSearchParams(body).toString();
     }
 
-    const resp = await httpRequest(`${this.auth.baseUrl}/api2/json${path}`, {
+    return httpRequest(`${this.auth.baseUrl}/api2/json${path}`, {
       method,
       headers,
       body: reqBody,
       verifySsl: this.auth.verifySsl,
     });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`PVE API ${method} ${path} failed (${resp.status}): ${text}`);
-    }
-
-    const json = (await resp.json()) as { data: T };
-    return json.data;
   }
 
   /**
@@ -128,6 +162,45 @@ export class PveApiClient {
     const vm = vms.find((v) => v.vmid === vmid);
     if (!vm) throw new Error(`VM ${vmid} not found in cluster`);
     return vm.node;
+  }
+
+  // --- Snapshots ---
+
+  async listSnapshots(node: string, vmid: number): Promise<Snapshot[]> {
+    return this.request("GET", `/nodes/${node}/qemu/${vmid}/snapshot`);
+  }
+
+  async createSnapshot(node: string, vmid: number, snapname: string, description?: string, vmstate?: boolean): Promise<string> {
+    const body: Record<string, string> = { snapname };
+    if (description) body.description = description;
+    if (vmstate) body.vmstate = "1";
+    return this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot`, body);
+  }
+
+  async deleteSnapshot(node: string, vmid: number, snapname: string, force?: boolean): Promise<string> {
+    const query = force ? "?force=1" : "";
+    return this.request("DELETE", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}${query}`);
+  }
+
+  async rollbackSnapshot(node: string, vmid: number, snapname: string): Promise<string> {
+    return this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`);
+  }
+
+  // --- Backups ---
+
+  async createBackup(node: string, vmid: number, storage?: string, compress?: string, mode?: string, notes?: string): Promise<string> {
+    const body: Record<string, string> = { vmid: String(vmid) };
+    if (storage) body.storage = storage;
+    if (compress) body.compress = compress;
+    if (mode) body.mode = mode;
+    if (notes) body["notes-template"] = notes;
+    return this.request("POST", `/nodes/${node}/vzdump`, body);
+  }
+
+  async listBackups(node: string, storage: string, vmid?: number): Promise<BackupVolume[]> {
+    let query = "?content=backup";
+    if (vmid !== undefined) query += `&vmid=${vmid}`;
+    return this.request("GET", `/nodes/${node}/storage/${encodeURIComponent(storage)}/content${query}`);
   }
 
   /**

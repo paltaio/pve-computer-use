@@ -207,15 +207,18 @@ server.registerTool("press_key", {
 
 server.registerTool("drag", {
   title: "Drag",
-  description: "Drag from one position to another on the VM screen.",
+  description: "Drag from one position to another on the VM screen with animated easing.",
   inputSchema: {
     from_x: z.number().int().nonnegative().describe("Start X in screenshot space"),
     from_y: z.number().int().nonnegative().describe("Start Y in screenshot space"),
     to_x: z.number().int().nonnegative().describe("End X in screenshot space"),
     to_y: z.number().int().nonnegative().describe("End Y in screenshot space"),
+    steps: z.number().int().positive().default(20).describe("Intermediate pointer steps (default 20)"),
+    duration_ms: z.number().int().positive().default(500).describe("Total drag duration in ms (default 500)"),
+    easing: z.enum(["linear", "ease-in", "ease-out", "ease-in-out"]).default("ease-in-out").describe("Easing curve (default ease-in-out)"),
     vmid: z.number().int().positive().optional().describe("VM ID. Uses active session if omitted."),
   },
-}, async ({ from_x, from_y, to_x, to_y, vmid }) => {
+}, async ({ from_x, from_y, to_x, to_y, steps, duration_ms, easing, vmid }) => {
   const id = resolveVmid(vmid);
   const session = sessions.getConnectedSession(id);
   const fb = session.screen;
@@ -225,12 +228,12 @@ server.registerTool("drag", {
   const from = scaleCoordinates(from_x, from_y, scaleFactor, fb.width, fb.height);
   const to = scaleCoordinates(to_x, to_y, scaleFactor, fb.width, fb.height);
 
-  session.drag(from.x, from.y, to.x, to.y);
+  await session.drag(from.x, from.y, to.x, to.y, steps, duration_ms, easing);
 
   return {
     content: [{
       type: "text" as const,
-      text: `Dragged from (${from.x}, ${from.y}) to (${to.x}, ${to.y})`,
+      text: `Dragged from (${from.x}, ${from.y}) to (${to.x}, ${to.y}) [${steps} steps, ${duration_ms}ms, ${easing}]`,
     }],
   };
 });
@@ -310,6 +313,36 @@ server.registerTool("disconnect", {
   };
 });
 
+// --- Tool: list_vms ---
+
+server.registerTool("list_vms", {
+  title: "List VMs",
+  description: "List all QEMU virtual machines visible to the authenticated user. Shows vmid, name, status, and node.",
+  inputSchema: {},
+}, async () => {
+  const vms = await api.listVms();
+
+  if (vms.length === 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: "No VMs found (or no permissions to view any).",
+      }],
+    };
+  }
+
+  const lines = vms.map((vm) =>
+    `VM ${vm.vmid}: name=${vm.name ?? "unknown"}, status=${vm.status}, node=${vm.node}`
+  );
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: lines.join("\n"),
+    }],
+  };
+});
+
 // --- Optional tools: VM power management ---
 
 server.registerTool("vm_start", {
@@ -331,9 +364,28 @@ server.registerTool("vm_start", {
   };
 });
 
+server.registerTool("vm_shutdown", {
+  title: "Shutdown VM",
+  description: "Gracefully shutdown a VM via ACPI power-off. Requires VM.PowerMgmt privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.shutdownVm(resolvedNode, vmid);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} graceful shutdown requested`,
+    }],
+  };
+});
+
 server.registerTool("vm_stop", {
   title: "Stop VM",
-  description: "Force stop a VM. Requires VM.PowerMgmt privilege. Use vm_shutdown for graceful shutdown.",
+  description: "Force stop a VM (like pulling the power cord). Requires VM.PowerMgmt privilege. Prefer vm_shutdown for graceful shutdown.",
   inputSchema: {
     vmid: z.number().int().positive().describe("VM ID"),
     node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
@@ -345,7 +397,7 @@ server.registerTool("vm_stop", {
   return {
     content: [{
       type: "text" as const,
-      text: `VM ${vmid} stop requested`,
+      text: `VM ${vmid} force stop requested`,
     }],
   };
 });
@@ -386,6 +438,169 @@ server.registerTool("exec_command", {
     content: [{
       type: "text" as const,
       text: `Exit code: ${result.exitcode}\nStdout: ${result.stdout}\nStderr: ${result.stderr}`,
+    }],
+  };
+});
+
+// --- Snapshot tools ---
+
+server.registerTool("snapshot_list", {
+  title: "List Snapshots",
+  description: "List all snapshots for a VM. Requires VM.Audit privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  const snapshots = await api.listSnapshots(resolvedNode, vmid);
+
+  // Filter out the "current" pseudo-snapshot
+  const real = snapshots.filter((s) => s.name !== "current");
+
+  if (real.length === 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: `VM ${vmid} has no snapshots.`,
+      }],
+    };
+  }
+
+  const lines = real.map((s) => {
+    const time = s.snaptime ? new Date(s.snaptime * 1000).toISOString() : "n/a";
+    const desc = s.description ?? "";
+    const mem = s.vmstate ? " [+memory]" : "";
+    return `  ${s.name} — ${time}${mem}${desc ? ` — ${desc}` : ""}`;
+  });
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} snapshots:\n${lines.join("\n")}`,
+    }],
+  };
+});
+
+server.registerTool("snapshot_create", {
+  title: "Create Snapshot",
+  description: "Create a snapshot of a VM. Requires VM.Snapshot privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    name: z.string().min(1).describe("Snapshot name"),
+    description: z.string().optional().describe("Snapshot description"),
+    vmstate: z.boolean().default(false).describe("Include VM memory state (default false)"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, name, description, vmstate, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.createSnapshot(resolvedNode, vmid, name, description, vmstate);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Snapshot "${name}" created for VM ${vmid}${vmstate ? " (with memory state)" : ""}`,
+    }],
+  };
+});
+
+server.registerTool("snapshot_delete", {
+  title: "Delete Snapshot",
+  description: "Delete a snapshot from a VM. Requires VM.Snapshot privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    name: z.string().min(1).describe("Snapshot name to delete"),
+    force: z.boolean().default(false).describe("Force removal of stuck snapshots (default false)"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, name, force, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.deleteSnapshot(resolvedNode, vmid, name, force);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Snapshot "${name}" deletion requested for VM ${vmid}`,
+    }],
+  };
+});
+
+server.registerTool("snapshot_rollback", {
+  title: "Rollback Snapshot",
+  description: "Rollback a VM to a previous snapshot. The VM will be stopped and restored. Requires VM.Snapshot privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    name: z.string().min(1).describe("Snapshot name to rollback to"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, name, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.rollbackSnapshot(resolvedNode, vmid, name);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} rollback to snapshot "${name}" requested`,
+    }],
+  };
+});
+
+// --- Backup tools ---
+
+server.registerTool("backup_create", {
+  title: "Create Backup",
+  description: "Create a backup (vzdump) of a VM. Requires VM.Backup privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    storage: z.string().optional().describe("Target storage (must support backups)"),
+    compress: z.enum(["0", "gzip", "lzo", "zstd"]).default("zstd").describe("Compression algorithm (default zstd)"),
+    mode: z.enum(["snapshot", "stop", "suspend"]).default("snapshot").describe("Backup mode: snapshot (live), stop (consistent), suspend (compat)"),
+    notes: z.string().optional().describe("Backup notes template"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, storage, compress, mode, notes, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.createBackup(resolvedNode, vmid, storage, compress, mode, notes);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Backup of VM ${vmid} started (mode=${mode}, compress=${compress}${storage ? `, storage=${storage}` : ""})`,
+    }],
+  };
+});
+
+server.registerTool("backup_list", {
+  title: "List Backups",
+  description: "List backup files from a storage. Requires access to the storage.",
+  inputSchema: {
+    storage: z.string().describe("Storage name to list backups from"),
+    vmid: z.number().int().positive().optional().describe("Filter by VM ID"),
+    node: z.string().describe("PVE node name"),
+  },
+}, async ({ storage, vmid, node }) => {
+  const backups = await api.listBackups(node, storage, vmid);
+
+  if (backups.length === 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: `No backups found in storage "${storage}"${vmid ? ` for VM ${vmid}` : ""}.`,
+      }],
+    };
+  }
+
+  const lines = backups.map((b) => {
+    const time = new Date(b.ctime * 1000).toISOString();
+    const sizeMb = (b.size / 1024 / 1024).toFixed(1);
+    const prot = b.protected ? " [protected]" : "";
+    return `  ${b.volid} — ${time} — ${sizeMb} MB${prot}${b.notes ? ` — ${b.notes}` : ""}`;
+  });
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Backups in "${storage}"${vmid ? ` for VM ${vmid}` : ""}:\n${lines.join("\n")}`,
     }],
   };
 });

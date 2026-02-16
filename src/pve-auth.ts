@@ -48,7 +48,7 @@ export class PveAuthManager {
   private currentTicket: PveTicket | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private static readonly REFRESH_MARGIN_MS = 60 * 60 * 1000; // 1 hour
+  private static readonly REFRESH_MARGIN_MS = 5 * 60 * 1000; // 5 minutes
   private static readonly TICKET_LIFETIME_MS = 2 * 60 * 60 * 1000; // 2 hours
 
   constructor(credentials: PveCredentials) {
@@ -67,6 +67,14 @@ export class PveAuthManager {
     if (this.currentTicket && Date.now() < this.currentTicket.expiresAt - PveAuthManager.REFRESH_MARGIN_MS) {
       return this.currentTicket;
     }
+    return this.authenticate();
+  }
+
+  /**
+   * Force a fresh ticket, ignoring the cache. Useful after permission changes.
+   */
+  async forceRefresh(): Promise<PveTicket> {
+    this.currentTicket = null;
     return this.authenticate();
   }
 
