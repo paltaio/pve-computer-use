@@ -15,7 +15,7 @@ import { PveAuthManager, loadCredentialsFromEnv } from "./pve-auth.js";
 import { PveApiClient } from "./pve-api.js";
 import { VncSessionManager } from "./vnc-session.js";
 import { TerminalSessionManager } from "./terminal-session.js";
-import { captureScreenshot, scaleCoordinates, calculateScaleFactor } from "./screenshot.js";
+import { captureScreenshot } from "./screenshot.js";
 import { destroyDispatchers } from "./http.js";
 
 // --- State ---
@@ -25,8 +25,8 @@ let api: PveApiClient;
 let sessions: VncSessionManager;
 let termSessions: TerminalSessionManager;
 
-/** Track the last scale factor per VM for coordinate scaling */
-const lastScaleFactors = new Map<number, number>();
+/** Track screen size at time of last screenshot per VM */
+const lastScreenSize = new Map<number, { width: number; height: number }>();
 
 /** Track active vmid for single-session convenience (VNC) */
 let activeVmid: number | null = null;
@@ -44,6 +44,35 @@ function resolveTermVmid(vmid?: number): number {
   if (vmid !== undefined) return vmid;
   if (activeTermVmid !== null) return activeTermVmid;
   throw new Error("No vmid provided and no active terminal session. Call serial_connect first.");
+}
+
+/**
+ * Validate coordinates against the current framebuffer.
+ * Returns warnings if resolution changed since last screenshot or coords are out of bounds.
+ */
+function validateCoordinates(
+  id: number,
+  coords: { x: number; y: number }[],
+  fb: { width: number; height: number },
+): string[] {
+  const warnings: string[] = [];
+  const last = lastScreenSize.get(id);
+
+  if (last && (last.width !== fb.width || last.height !== fb.height)) {
+    warnings.push(
+      `WARNING: Screen resolution changed from ${last.width}x${last.height} to ${fb.width}x${fb.height} since last screenshot. Take a new screenshot before clicking.`
+    );
+  }
+
+  for (const { x, y } of coords) {
+    if (x >= fb.width || y >= fb.height) {
+      warnings.push(
+        `WARNING: Coordinate (${x}, ${y}) is out of bounds for ${fb.width}x${fb.height} screen.`
+      );
+    }
+  }
+
+  return warnings;
 }
 
 // --- MCP Server Setup ---
@@ -95,7 +124,7 @@ server.registerTool("screenshot", {
   if (!fb) throw new Error("Framebuffer not ready");
 
   const screenshot = await captureScreenshot(fb);
-  lastScaleFactors.set(id, screenshot.scaleFactor);
+  lastScreenSize.set(id, { width: screenshot.width, height: screenshot.height });
 
   return {
     content: [{
@@ -104,7 +133,7 @@ server.registerTool("screenshot", {
       mimeType: "image/jpeg" as const,
     }, {
       type: "text" as const,
-      text: `Screenshot: ${screenshot.actualWidth}x${screenshot.actualHeight} → ${screenshot.scaledWidth}x${screenshot.scaledHeight} (scale: ${screenshot.scaleFactor.toFixed(3)})`,
+      text: `Screenshot: ${screenshot.width}x${screenshot.height}`,
     }],
   };
 });
@@ -113,10 +142,10 @@ server.registerTool("screenshot", {
 
 server.registerTool("mouse_click", {
   title: "Mouse Click",
-  description: "Click at a position on the VM screen. Coordinates are in the screenshot's coordinate space.",
+  description: "Click at a position on the VM screen. Coordinates are in screen pixels.",
   inputSchema: {
-    x: z.number().int().nonnegative().describe("X coordinate in screenshot space"),
-    y: z.number().int().nonnegative().describe("Y coordinate in screenshot space"),
+    x: z.number().int().nonnegative().describe("X coordinate on screen"),
+    y: z.number().int().nonnegative().describe("Y coordinate on screen"),
     button: z.enum(["left", "right", "middle"]).default("left").describe("Mouse button"),
     vmid: z.number().int().positive().optional().describe("VM ID. Uses active session if omitted."),
   },
@@ -126,15 +155,14 @@ server.registerTool("mouse_click", {
   const fb = session.screen;
   if (!fb) throw new Error("Framebuffer not ready");
 
-  const scaleFactor = lastScaleFactors.get(id) ?? calculateScaleFactor(fb.width, fb.height);
-  const coords = scaleCoordinates(x, y, scaleFactor, fb.width, fb.height);
+  const warnings = validateCoordinates(id, [{ x, y }], fb);
+  session.click(x, y, button);
 
-  session.click(coords.x, coords.y, button);
-
+  const text = `Clicked ${button} at (${x}, ${y})`;
   return {
     content: [{
       type: "text" as const,
-      text: `Clicked ${button} at (${coords.x}, ${coords.y}) [screen coords from (${x}, ${y}) screenshot coords]`,
+      text: warnings.length ? `${warnings.join("\n")}\n${text}` : text,
     }],
   };
 });
@@ -145,8 +173,8 @@ server.registerTool("mouse_move", {
   title: "Mouse Move",
   description: "Move the mouse cursor to a position on the VM screen without clicking.",
   inputSchema: {
-    x: z.number().int().nonnegative().describe("X coordinate in screenshot space"),
-    y: z.number().int().nonnegative().describe("Y coordinate in screenshot space"),
+    x: z.number().int().nonnegative().describe("X coordinate on screen"),
+    y: z.number().int().nonnegative().describe("Y coordinate on screen"),
     vmid: z.number().int().positive().optional().describe("VM ID. Uses active session if omitted."),
   },
 }, async ({ x, y, vmid }) => {
@@ -155,15 +183,14 @@ server.registerTool("mouse_move", {
   const fb = session.screen;
   if (!fb) throw new Error("Framebuffer not ready");
 
-  const scaleFactor = lastScaleFactors.get(id) ?? calculateScaleFactor(fb.width, fb.height);
-  const coords = scaleCoordinates(x, y, scaleFactor, fb.width, fb.height);
+  const warnings = validateCoordinates(id, [{ x, y }], fb);
+  session.sendPointerEvent(0, x, y);
 
-  session.sendPointerEvent(0, coords.x, coords.y);
-
+  const text = `Moved mouse to (${x}, ${y})`;
   return {
     content: [{
       type: "text" as const,
-      text: `Moved mouse to (${coords.x}, ${coords.y})`,
+      text: warnings.length ? `${warnings.join("\n")}\n${text}` : text,
     }],
   };
 });
@@ -220,10 +247,10 @@ server.registerTool("drag", {
   title: "Drag",
   description: "Drag from one position to another on the VM screen with animated easing.",
   inputSchema: {
-    from_x: z.number().int().nonnegative().describe("Start X in screenshot space"),
-    from_y: z.number().int().nonnegative().describe("Start Y in screenshot space"),
-    to_x: z.number().int().nonnegative().describe("End X in screenshot space"),
-    to_y: z.number().int().nonnegative().describe("End Y in screenshot space"),
+    from_x: z.number().int().nonnegative().describe("Start X on screen"),
+    from_y: z.number().int().nonnegative().describe("Start Y on screen"),
+    to_x: z.number().int().nonnegative().describe("End X on screen"),
+    to_y: z.number().int().nonnegative().describe("End Y on screen"),
     steps: z.number().int().positive().default(20).describe("Intermediate pointer steps (default 20)"),
     duration_ms: z.number().int().positive().default(500).describe("Total drag duration in ms (default 500)"),
     easing: z.enum(["linear", "ease-in", "ease-out", "ease-in-out"]).default("ease-in-out").describe("Easing curve (default ease-in-out)"),
@@ -235,16 +262,14 @@ server.registerTool("drag", {
   const fb = session.screen;
   if (!fb) throw new Error("Framebuffer not ready");
 
-  const scaleFactor = lastScaleFactors.get(id) ?? calculateScaleFactor(fb.width, fb.height);
-  const from = scaleCoordinates(from_x, from_y, scaleFactor, fb.width, fb.height);
-  const to = scaleCoordinates(to_x, to_y, scaleFactor, fb.width, fb.height);
+  const warnings = validateCoordinates(id, [{ x: from_x, y: from_y }, { x: to_x, y: to_y }], fb);
+  await session.drag(from_x, from_y, to_x, to_y, steps, duration_ms, easing);
 
-  await session.drag(from.x, from.y, to.x, to.y, steps, duration_ms, easing);
-
+  const text = `Dragged from (${from_x}, ${from_y}) to (${to_x}, ${to_y}) [${steps} steps, ${duration_ms}ms, ${easing}]`;
   return {
     content: [{
       type: "text" as const,
-      text: `Dragged from (${from.x}, ${from.y}) to (${to.x}, ${to.y}) [${steps} steps, ${duration_ms}ms, ${easing}]`,
+      text: warnings.length ? `${warnings.join("\n")}\n${text}` : text,
     }],
   };
 });
@@ -255,8 +280,8 @@ server.registerTool("scroll", {
   title: "Scroll",
   description: "Scroll the mouse wheel at a position on the VM screen.",
   inputSchema: {
-    x: z.number().int().nonnegative().describe("X coordinate in screenshot space"),
-    y: z.number().int().nonnegative().describe("Y coordinate in screenshot space"),
+    x: z.number().int().nonnegative().describe("X coordinate on screen"),
+    y: z.number().int().nonnegative().describe("Y coordinate on screen"),
     direction: z.enum(["up", "down"]).describe("Scroll direction"),
     amount: z.number().int().positive().default(3).describe("Number of scroll clicks"),
     vmid: z.number().int().positive().optional().describe("VM ID. Uses active session if omitted."),
@@ -267,15 +292,14 @@ server.registerTool("scroll", {
   const fb = session.screen;
   if (!fb) throw new Error("Framebuffer not ready");
 
-  const scaleFactor = lastScaleFactors.get(id) ?? calculateScaleFactor(fb.width, fb.height);
-  const coords = scaleCoordinates(x, y, scaleFactor, fb.width, fb.height);
+  const warnings = validateCoordinates(id, [{ x, y }], fb);
+  session.scroll(x, y, direction, amount);
 
-  session.scroll(coords.x, coords.y, direction, amount);
-
+  const text = `Scrolled ${direction} ${amount} clicks at (${x}, ${y})`;
   return {
     content: [{
       type: "text" as const,
-      text: `Scrolled ${direction} ${amount} clicks at (${coords.x}, ${coords.y})`,
+      text: warnings.length ? `${warnings.join("\n")}\n${text}` : text,
     }],
   };
 });
@@ -313,7 +337,6 @@ server.registerTool("disconnect", {
 }, async ({ vmid }) => {
   const id = resolveVmid(vmid);
   sessions.disconnect(id);
-  lastScaleFactors.delete(id);
   if (activeVmid === id) activeVmid = null;
 
   return {
