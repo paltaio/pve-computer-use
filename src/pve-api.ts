@@ -46,17 +46,26 @@ export interface BackupVolume {
   protected?: boolean;
 }
 
+/** Raw response from PVE exec-status endpoint */
+interface GuestExecRaw {
+  exited: boolean;
+  exitcode?: number;
+  "out-data"?: string;
+  "err-data"?: string;
+  "out-truncated"?: boolean;
+  "err-truncated"?: boolean;
+}
+
 export interface GuestExecResult {
   exitcode: number;
   stdout: string;
   stderr: string;
-  exited: boolean;
 }
 
 export class PveApiClient {
   constructor(private auth: PveAuthManager) {}
 
-  private async request<T>(method: string, path: string, body?: Record<string, string>, extraHeaders?: Record<string, string>): Promise<T> {
+  private async request<T>(method: string, path: string, body?: Record<string, string> | URLSearchParams, extraHeaders?: Record<string, string>): Promise<T> {
     const resp = await this.doRequest(method, path, body, extraHeaders);
 
     // On 403, force a fresh ticket and retry once — permissions may have changed
@@ -80,7 +89,7 @@ export class PveApiClient {
     return json.data;
   }
 
-  private async doRequest(method: string, path: string, body?: Record<string, string>, extraHeaders?: Record<string, string>) {
+  private async doRequest(method: string, path: string, body?: Record<string, string> | URLSearchParams, extraHeaders?: Record<string, string>) {
     const ticket = await this.auth.getTicket();
 
     const headers: Record<string, string> = {
@@ -98,7 +107,8 @@ export class PveApiClient {
     let reqBody: string | undefined;
     if (body) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
-      reqBody = new URLSearchParams(body).toString();
+      const params = body instanceof URLSearchParams ? body : new URLSearchParams(body);
+      reqBody = params.toString();
     }
 
     return httpRequest(`${this.auth.baseUrl}/api2/json${path}`, {
@@ -235,18 +245,22 @@ export class PveApiClient {
 
   /**
    * Execute a command inside the VM via QEMU guest agent.
+   * PVE 8+ expects command as a repeated form param: command[]=/bin/cmd&command[]=arg1&...
    * Requires qemu-guest-agent running in the VM and VM.GuestAgent.Unrestricted privilege.
    */
   async guestExec(node: string, vmid: number, command: string, args?: string[]): Promise<GuestExecResult> {
-    const execBody: Record<string, string> = { command };
-    if (args && args.length > 0) {
-      execBody["input-data"] = JSON.stringify(args);
+    const params = new URLSearchParams();
+    params.append("command", command);
+    if (args) {
+      for (const arg of args) {
+        params.append("command", arg);
+      }
     }
 
     const { pid } = await this.request<{ pid: number }>(
       "POST",
       `/nodes/${node}/qemu/${vmid}/agent/exec`,
-      execBody,
+      params,
     );
 
     // Poll for completion
@@ -254,13 +268,19 @@ export class PveApiClient {
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 1000));
 
-      const status = await this.request<GuestExecResult>(
+      const raw = await this.request<GuestExecRaw>(
         "GET",
         `/nodes/${node}/qemu/${vmid}/agent/exec-status?pid=${pid}`,
       );
 
-      if (status.exited) {
-        return status;
+      if (raw.exited) {
+        const outRaw = raw["out-data"] ?? "";
+        const errRaw = raw["err-data"] ?? "";
+        return {
+          exitcode: raw.exitcode ?? -1,
+          stdout: outRaw,
+          stderr: errRaw,
+        };
       }
     }
 
