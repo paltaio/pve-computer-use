@@ -393,7 +393,7 @@ server.registerTool("vm_start", {
   return {
     content: [{
       type: "text" as const,
-      text: `VM ${vmid} start requested`,
+      text: `VM ${vmid} started successfully`,
     }],
   };
 });
@@ -412,7 +412,7 @@ server.registerTool("vm_shutdown", {
   return {
     content: [{
       type: "text" as const,
-      text: `VM ${vmid} graceful shutdown requested`,
+      text: `VM ${vmid} shutdown completed`,
     }],
   };
 });
@@ -431,7 +431,7 @@ server.registerTool("vm_stop", {
   return {
     content: [{
       type: "text" as const,
-      text: `VM ${vmid} force stop requested`,
+      text: `VM ${vmid} force stopped`,
     }],
   };
 });
