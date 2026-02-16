@@ -1,0 +1,30 @@
+{
+  "name": "pve-vm-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for AI computer use on Proxmox VE virtual machines via VNC",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "proxmox",
+    "vnc",
+    "computer-use"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "sharp": "^0.34.5",
+    "undici": "^7.22.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}
