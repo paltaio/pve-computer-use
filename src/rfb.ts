@@ -170,7 +170,10 @@ export const SPECIAL_KEYS: Record<string, number> = {
   super: 0xffeb,
   super_l: 0xffeb,
   super_r: 0xffec,
-  meta: 0xffe7,
+  // Map "meta" to Windows/Super for practical automation on Windows guests.
+  meta: 0xffeb,
+  meta_l: 0xffeb,
+  meta_r: 0xffec,
   capslock: 0xffe5,
   numlock: 0xff7f,
   scrolllock: 0xff14,

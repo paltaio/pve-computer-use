@@ -47,6 +47,34 @@ const EASING_FUNCTIONS: Record<EasingType, (t: number) => number> = {
   "ease-in-out": (t) => t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2,
 };
 
+/**
+ * Fallback mapping for shifted ASCII symbols to deterministic key combos.
+ * This avoids layout-dependent ambiguity when sending raw shifted keysyms.
+ */
+const SHIFTED_CHAR_COMBOS: Record<string, string> = {
+  "~": "shift+`",
+  "!": "shift+1",
+  "@": "shift+2",
+  "#": "shift+3",
+  "$": "shift+4",
+  "%": "shift+5",
+  "^": "shift+6",
+  "&": "shift+7",
+  "*": "shift+8",
+  "(": "shift+9",
+  ")": "shift+0",
+  "_": "shift+-",
+  "+": "shift+=",
+  "{": "shift+[",
+  "}": "shift+]",
+  "|": "shift+\\",
+  ":": "shift+;",
+  "\"": "shift+'",
+  "<": "shift+,",
+  ">": "shift+.",
+  "?": "shift+/",
+};
+
 export interface VncSessionOptions {
   node: string;
   vmid: number;
@@ -485,6 +513,25 @@ export class VncSession extends EventEmitter {
    */
   typeText(text: string): void {
     for (const char of text) {
+      if (char === "\n") {
+        this.sendKeyEvent(true, 0xff0d); // Return
+        this.sendKeyEvent(false, 0xff0d);
+        continue;
+      }
+      if (char === "\t") {
+        this.sendKeyEvent(true, 0xff09); // Tab
+        this.sendKeyEvent(false, 0xff09);
+        continue;
+      }
+
+      const combo = SHIFTED_CHAR_COMBOS[char];
+      if (combo) {
+        const keysyms = parseKeyCombo(combo);
+        for (const keysym of keysyms) this.sendKeyEvent(true, keysym);
+        for (let i = keysyms.length - 1; i >= 0; i--) this.sendKeyEvent(false, keysyms[i]);
+        continue;
+      }
+
       const keysym = charToKeysym(char);
       this.sendKeyEvent(true, keysym);
       this.sendKeyEvent(false, keysym);
