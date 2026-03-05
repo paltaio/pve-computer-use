@@ -39,6 +39,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Supported easing curves for drag animation. */
 export type EasingType = "linear" | "ease-in" | "ease-out" | "ease-in-out";
+export type KeyboardLayout = "en-US" | "es-ES";
 
 const EASING_FUNCTIONS: Record<EasingType, (t: number) => number> = {
   "linear": (t) => t,
@@ -582,22 +583,40 @@ export class VncSession extends EventEmitter {
   /**
    * Type a string by sending key down+up for each character.
    */
-  typeText(text: string): void {
+  async typeText(text: string, layout: KeyboardLayout = "en-US", delayMs: number = 8): Promise<void> {
     for (const char of text) {
-      const mapped = getUsKeyForChar(char);
-      if (mapped) {
-        this.sendUsKey(mapped.key, mapped.shift, mapped.keysymToken);
+      if (layout === "es-ES") {
+        if (char === "\n") {
+          const enter = charToKeysym("enter");
+          this.sendKeyEvent(true, enter);
+          this.sendKeyEvent(false, enter);
+          if (delayMs > 0) await sleep(delayMs);
+          continue;
+        }
+        // ES layouts use dead keys for several punctuation characters.
+        // Sending pure keysyms avoids US scancode/dead-key interference.
+        const keysym = charToKeysym(char);
+        this.sendKeyEvent(true, keysym);
+        this.sendKeyEvent(false, keysym);
+        if (delayMs > 0) await sleep(delayMs);
         continue;
       }
 
-      // Fallback for non-US/non-ASCII chars.
-      const keysym = charToKeysym(char);
-      this.sendKeyEvent(true, keysym);
-      this.sendKeyEvent(false, keysym);
+      const mapped = getUsKeyForChar(char);
+      if (mapped) {
+        this.sendMappedKey(mapped.key, mapped.shift, mapped.keysymToken);
+      } else {
+        // Fallback for non-US/non-ASCII chars.
+        const keysym = charToKeysym(char);
+        this.sendKeyEvent(true, keysym);
+        this.sendKeyEvent(false, keysym);
+      }
+
+      if (delayMs > 0) await sleep(delayMs);
     }
   }
 
-  private sendUsKey(baseKey: string, withShift: boolean, keysymToken: string): void {
+  private sendMappedKey(baseKey: string, withShift: boolean, keysymToken: string): void {
     const scancode = XT_SCANCODES[baseKey];
     if (scancode === undefined) {
       throw new Error(`No XT scancode mapping for key "${baseKey}"`);

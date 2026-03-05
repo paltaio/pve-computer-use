@@ -38,6 +38,11 @@ let activeVmid: number | null = null;
 let activeTermVmid: number | null = null;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+type TextStrategy = "auto" | "clipboard" | "vnc_keys";
+const SCHTASKS_TR_MAX_CHARS = 261;
+const SCHTASKS_TR_SAFE_HEADROOM = 21;
+const TASK_STATUS_POLL_INTERVAL_MS = 120;
+const TASK_STATUS_TIMEOUT_MS = 6000;
 
 function resolveVmid(vmid?: number): number {
   if (vmid !== undefined) return vmid;
@@ -95,6 +100,205 @@ async function getOrConnectVncSession(vmid: number, node?: string) {
   return session;
 }
 
+function psSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+async function isWindowsGuest(node: string, vmid: number): Promise<boolean> {
+  try {
+    const result = await api.guestExec(node, vmid, "C:\\Windows\\System32\\cmd.exe", ["/c", "ver"]);
+    return result.exitcode === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function getActiveWindowsUsername(node: string, vmid: number): Promise<string> {
+  const result = await api.guestExec(node, vmid, "C:\\Windows\\System32\\cmd.exe", ["/c", "query user"]);
+  // query user may return non-zero while still printing valid session rows.
+  // Parse stdout first and only fail if no active user can be extracted.
+
+  const lines = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const raw of lines) {
+    const line = raw.replace(/^>/, "").trim();
+    if (!/\bActive\b/i.test(line)) continue;
+    const m = line.match(/^(\S+)/);
+    if (m?.[1]) return m[1];
+  }
+
+  throw new Error(`Could not find an Active desktop user (query user). exit=${result.exitcode} stderr=${result.stderr || ""}`.trim());
+}
+
+async function runInteractiveWindowsTask(node: string, vmid: number, username: string, taskName: string, taskCommand: string): Promise<void> {
+  const createArgs = ["/create", "/tn", taskName, "/tr", taskCommand, "/sc", "once", "/st", "00:00", "/ru", username, "/it", "/f"];
+  const create = await api.guestExec(node, vmid, "C:\\Windows\\System32\\schtasks.exe", createArgs);
+  if (create.exitcode !== 0) {
+    throw new Error(`schtasks create failed: ${create.stderr || create.stdout || "unknown error"}`);
+  }
+
+  const run = await api.guestExec(node, vmid, "C:\\Windows\\System32\\schtasks.exe", ["/run", "/tn", taskName]);
+  if (run.exitcode !== 0) {
+    await api.guestExec(node, vmid, "C:\\Windows\\System32\\schtasks.exe", ["/delete", "/tn", taskName, "/f"]);
+    throw new Error(`schtasks run failed: ${run.stderr || run.stdout || "unknown error"}`);
+  }
+}
+
+async function cleanupInteractiveWindowsTask(node: string, vmid: number, taskName: string): Promise<void> {
+  await api.guestExec(node, vmid, "C:\\Windows\\System32\\schtasks.exe", ["/delete", "/tn", taskName, "/f"]);
+}
+
+function encodePowerShellCommand(command: string): string {
+  return Buffer.from(command, "utf16le").toString("base64");
+}
+
+async function writeWindowsUtf16File(node: string, vmid: number, path: string, content: string): Promise<void> {
+  const b64 = Buffer.from(content, "utf16le").toString("base64");
+  const command = `[IO.File]::WriteAllText('${psSingleQuoted(path)}', [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}')), [Text.Encoding]::Unicode)`;
+  const result = await api.guestExec(
+    node,
+    vmid,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    ["-NoProfile", "-Command", command],
+  );
+  if (result.exitcode !== 0) {
+    throw new Error(`WriteAllText failed: ${result.stderr || "unknown error"}`);
+  }
+}
+
+async function removeWindowsFile(node: string, vmid: number, path: string): Promise<void> {
+  await api.guestExec(node, vmid, "C:\\Windows\\System32\\cmd.exe", ["/c", "del", "/f", "/q", path]);
+}
+
+function extractJsonObject(text: string): string {
+  const trimmed = text.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error(`Invalid task status payload: ${trimmed || "empty output"}`);
+  }
+  return trimmed.slice(start, end + 1);
+}
+
+async function waitInteractiveWindowsTaskCompletion(
+  node: string,
+  vmid: number,
+  taskName: string,
+  timeoutMs: number = TASK_STATUS_TIMEOUT_MS,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const statusCommand = [
+      `$name='${psSingleQuoted(taskName)}'`,
+      "$task = Get-ScheduledTask -TaskName $name -ErrorAction Stop",
+      "$info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction Stop",
+      "[PSCustomObject]@{ State = [string]$task.State; LastTaskResult = [int]$info.LastTaskResult } | ConvertTo-Json -Compress",
+    ].join("; ");
+    const status = await api.guestExec(
+      node,
+      vmid,
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      ["-NoProfile", "-Command", statusCommand],
+    );
+    if (status.exitcode !== 0) {
+      throw new Error(`task status check failed: ${status.stderr || status.stdout || "unknown error"}`);
+    }
+
+    const parsed = JSON.parse(extractJsonObject(status.stdout)) as { State?: string; LastTaskResult?: number };
+    const state = parsed.State ?? "Unknown";
+    const result = parsed.LastTaskResult ?? -1;
+
+    if (state.toLowerCase() !== "running") {
+      if (result === 0) return;
+      // 267011 (0x41303): task has not yet run.
+      if (result !== 267011) {
+        throw new Error(`interactive task failed (state=${state}, result=${result})`);
+      }
+    }
+    await sleep(TASK_STATUS_POLL_INTERVAL_MS);
+  }
+  throw new Error(`interactive task did not complete within ${timeoutMs}ms`);
+}
+
+async function typeTextWindowsClipboard(node: string, vmid: number, text: string): Promise<void> {
+  const username = await getActiveWindowsUsername(node, vmid);
+  const taskName = `McpSetClipboard_${vmid}_${Date.now()}`;
+  const scriptPath = `C:\\Users\\Public\\Documents\\${taskName}.ps1`;
+  const textB64 = Buffer.from(text, "utf16le").toString("base64");
+  const taskScript = [
+    "$ErrorActionPreference = 'Stop'",
+    `$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${textB64}'))`,
+    "Set-Clipboard -Value $text",
+  ].join("; ");
+  const encodedScript = encodePowerShellCommand(taskScript);
+  const encodedTaskCommand = `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`;
+  const fileTaskCommand = `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "${scriptPath}"`;
+
+  // schtasks /tr has a strict length limit (261 chars). Use fileless mode when it fits;
+  // otherwise use a short -File command and delete the temp script right away.
+  const maxSafeLength = SCHTASKS_TR_MAX_CHARS - SCHTASKS_TR_SAFE_HEADROOM;
+  const needsFileFallback = encodedTaskCommand.length > maxSafeLength;
+  const taskCommand = needsFileFallback ? fileTaskCommand : encodedTaskCommand;
+
+  try {
+    if (needsFileFallback) {
+      await writeWindowsUtf16File(node, vmid, scriptPath, taskScript);
+    }
+    await runInteractiveWindowsTask(node, vmid, username, taskName, taskCommand);
+    await waitInteractiveWindowsTaskCompletion(node, vmid, taskName);
+  } finally {
+    if (needsFileFallback) {
+      await removeWindowsFile(node, vmid, scriptPath);
+    }
+    await cleanupInteractiveWindowsTask(node, vmid, taskName);
+  }
+}
+
+async function pasteClipboardViaVnc(session: ReturnType<typeof sessions.getConnectedSession>): Promise<void> {
+  session.pressKey("ctrl+v");
+  await sleep(120);
+}
+
+async function typeTextByStrategy(
+  vmid: number,
+  session: ReturnType<typeof sessions.getConnectedSession>,
+  text: string,
+  keyboardLayout: "en-US" | "es-ES",
+  delayMs: number,
+  strategy: TextStrategy,
+): Promise<string> {
+  const node = session.node;
+  const isWindows = await isWindowsGuest(node, vmid);
+  const performVnc = async () => {
+    await session.typeText(text, keyboardLayout, delayMs);
+    return "vnc_keys";
+  };
+
+  if (strategy === "vnc_keys") return performVnc();
+  if (strategy === "clipboard") {
+    if (!isWindows) return performVnc();
+    await typeTextWindowsClipboard(node, vmid, text);
+    await pasteClipboardViaVnc(session);
+    return "clipboard";
+  }
+
+  if (!isWindows) {
+    return performVnc();
+  }
+
+  // auto: clipboard -> vnc keys
+  try {
+    await typeTextWindowsClipboard(node, vmid, text);
+    await pasteClipboardViaVnc(session);
+    return "clipboard";
+  } catch {
+    return performVnc();
+  }
+}
+
 const timelineActionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("wait"),
@@ -141,6 +345,9 @@ const timelineActionSchema = z.discriminatedUnion("type", [
     vmid: z.number().int().positive().optional().describe("VM ID (falls back to timeline vmid/active session)"),
     node: z.string().optional().describe("Used only when auto-connecting VNC"),
     text: z.string().min(1),
+    keyboard_layout: z.enum(["en-US", "es-ES"]).default("en-US").describe("Keyboard layout for deterministic text typing"),
+    delay_ms: z.number().int().nonnegative().default(8).describe("Delay between characters in milliseconds"),
+    text_strategy: z.enum(["auto", "clipboard", "vnc_keys"]).default("auto").describe("Text input strategy"),
   }),
   z.object({
     type: z.literal("press_key"),
@@ -337,21 +544,23 @@ server.registerTool("mouse_move", {
 
 server.registerTool("type_text", {
   title: "Type Text",
-  description: "Type text on the VM's keyboard. Each character is sent as a key press+release.",
+  description: "Type text into the VM using an intent-based strategy (auto/clipboard/vnc_keys).",
   inputSchema: {
     text: z.string().min(1).describe("Text to type"),
+    keyboard_layout: z.enum(["en-US", "es-ES"]).default("en-US").describe("Keyboard layout for deterministic text typing"),
+    delay_ms: z.number().int().nonnegative().default(8).describe("Delay between characters in milliseconds for app-side reliability"),
+    text_strategy: z.enum(["auto", "clipboard", "vnc_keys"]).default("auto").describe("Text input strategy"),
     vmid: z.number().int().positive().optional().describe("VM ID. Uses active session if omitted."),
   },
-}, async ({ text, vmid }) => {
+}, async ({ text, keyboard_layout, delay_ms, text_strategy, vmid }) => {
   const id = resolveVmid(vmid);
   const session = sessions.getConnectedSession(id);
-
-  session.typeText(text);
+  const backend = await typeTextByStrategy(id, session, text, keyboard_layout, delay_ms, text_strategy);
 
   return {
     content: [{
       type: "text" as const,
-      text: `Typed ${text.length} character(s)`,
+      text: `Typed ${text.length} character(s) via ${backend}`,
     }],
   };
 });
@@ -734,8 +943,8 @@ server.registerTool("timeline", {
         case "type_text": {
           const id = resolveTimelineVmid(action.vmid, vmid);
           const session = await getOrConnectVncSession(id, action.node);
-          session.typeText(action.text);
-          message = `typed ${action.text.length} character(s)`;
+          const backend = await typeTextByStrategy(id, session, action.text, action.keyboard_layout, action.delay_ms, action.text_strategy);
+          message = `typed ${action.text.length} character(s) via ${backend}`;
           break;
         }
         case "press_key": {
