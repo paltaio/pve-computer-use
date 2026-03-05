@@ -47,33 +47,104 @@ const EASING_FUNCTIONS: Record<EasingType, (t: number) => number> = {
   "ease-in-out": (t) => t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2,
 };
 
-/**
- * Fallback mapping for shifted ASCII symbols to deterministic key combos.
- * This avoids layout-dependent ambiguity when sending raw shifted keysyms.
- */
-const SHIFTED_CHAR_COMBOS: Record<string, string> = {
-  "~": "shift+`",
-  "!": "shift+1",
-  "@": "shift+2",
-  "#": "shift+3",
-  "$": "shift+4",
-  "%": "shift+5",
-  "^": "shift+6",
-  "&": "shift+7",
-  "*": "shift+8",
-  "(": "shift+9",
-  ")": "shift+0",
-  "_": "shift+-",
-  "+": "shift+=",
-  "{": "shift+[",
-  "}": "shift+]",
-  "|": "shift+\\",
-  ":": "shift+;",
-  "\"": "shift+'",
-  "<": "shift+,",
-  ">": "shift+.",
-  "?": "shift+/",
+/** XT Set 1 scancodes for US keyboard layout (subset used by typeText). */
+const XT_SCANCODES: Record<string, number> = {
+  "1": 0x02,
+  "2": 0x03,
+  "3": 0x04,
+  "4": 0x05,
+  "5": 0x06,
+  "6": 0x07,
+  "7": 0x08,
+  "8": 0x09,
+  "9": 0x0a,
+  "0": 0x0b,
+  "-": 0x0c,
+  "=": 0x0d,
+  tab: 0x0f,
+  q: 0x10,
+  w: 0x11,
+  e: 0x12,
+  r: 0x13,
+  t: 0x14,
+  y: 0x15,
+  u: 0x16,
+  i: 0x17,
+  o: 0x18,
+  p: 0x19,
+  "[": 0x1a,
+  "]": 0x1b,
+  enter: 0x1c,
+  a: 0x1e,
+  s: 0x1f,
+  d: 0x20,
+  f: 0x21,
+  g: 0x22,
+  h: 0x23,
+  j: 0x24,
+  k: 0x25,
+  l: 0x26,
+  ";": 0x27,
+  "'": 0x28,
+  "`": 0x29,
+  shift: 0x2a, // left shift
+  "\\": 0x2b,
+  z: 0x2c,
+  x: 0x2d,
+  c: 0x2e,
+  v: 0x2f,
+  b: 0x30,
+  n: 0x31,
+  m: 0x32,
+  ",": 0x33,
+  ".": 0x34,
+  "/": 0x35,
+  space: 0x39,
 };
+
+const SHIFTED_BASE_KEYS: Record<string, string> = {
+  "~": "`",
+  "!": "1",
+  "@": "2",
+  "#": "3",
+  "$": "4",
+  "%": "5",
+  "^": "6",
+  "&": "7",
+  "*": "8",
+  "(": "9",
+  ")": "0",
+  "_": "-",
+  "+": "=",
+  "{": "[",
+  "}": "]",
+  "|": "\\",
+  ":": ";",
+  "\"": "'",
+  "<": ",",
+  ">": ".",
+  "?": "/",
+};
+
+function getUsKeyForChar(char: string): { key: string; shift: boolean; keysymToken: string } | null {
+  if (char === " ") return { key: "space", shift: false, keysymToken: "space" };
+  if (char === "\n") return { key: "enter", shift: false, keysymToken: "enter" };
+  if (char === "\t") return { key: "tab", shift: false, keysymToken: "tab" };
+
+  if (SHIFTED_BASE_KEYS[char]) {
+    return { key: SHIFTED_BASE_KEYS[char], shift: true, keysymToken: char };
+  }
+
+  if (char.length === 1 && char >= "A" && char <= "Z") {
+    return { key: char.toLowerCase(), shift: true, keysymToken: char };
+  }
+
+  if (char.length === 1 && XT_SCANCODES[char] !== undefined) {
+    return { key: char, shift: false, keysymToken: char };
+  }
+
+  return null;
+}
 
 export interface VncSessionOptions {
   node: string;
@@ -513,28 +584,38 @@ export class VncSession extends EventEmitter {
    */
   typeText(text: string): void {
     for (const char of text) {
-      if (char === "\n") {
-        this.sendKeyEvent(true, 0xff0d); // Return
-        this.sendKeyEvent(false, 0xff0d);
-        continue;
-      }
-      if (char === "\t") {
-        this.sendKeyEvent(true, 0xff09); // Tab
-        this.sendKeyEvent(false, 0xff09);
+      const mapped = getUsKeyForChar(char);
+      if (mapped) {
+        this.sendUsKey(mapped.key, mapped.shift, mapped.keysymToken);
         continue;
       }
 
-      const combo = SHIFTED_CHAR_COMBOS[char];
-      if (combo) {
-        const keysyms = parseKeyCombo(combo);
-        for (const keysym of keysyms) this.sendKeyEvent(true, keysym);
-        for (let i = keysyms.length - 1; i >= 0; i--) this.sendKeyEvent(false, keysyms[i]);
-        continue;
-      }
-
+      // Fallback for non-US/non-ASCII chars.
       const keysym = charToKeysym(char);
       this.sendKeyEvent(true, keysym);
       this.sendKeyEvent(false, keysym);
+    }
+  }
+
+  private sendUsKey(baseKey: string, withShift: boolean, keysymToken: string): void {
+    const scancode = XT_SCANCODES[baseKey];
+    if (scancode === undefined) {
+      throw new Error(`No XT scancode mapping for key "${baseKey}"`);
+    }
+
+    const keysym = charToKeysym(keysymToken);
+    const shiftKeysym = charToKeysym("shift");
+    const shiftScancode = XT_SCANCODES.shift;
+
+    if (withShift) {
+      this.sendExtendedKeyEvent(true, shiftKeysym, shiftScancode);
+    }
+
+    this.sendExtendedKeyEvent(true, keysym, scancode);
+    this.sendExtendedKeyEvent(false, keysym, scancode);
+
+    if (withShift) {
+      this.sendExtendedKeyEvent(false, shiftKeysym, shiftScancode);
     }
   }
 
