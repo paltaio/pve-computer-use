@@ -545,17 +545,19 @@ export class VncSession extends EventEmitter {
     steps: number = 20,
     durationMs: number = 500,
     easing: EasingType = "ease-in-out",
+    startHoldMs: number = 50,
+    endHoldMs: number = 50,
   ): Promise<void> {
     const delay = durationMs / steps;
     const ease = EASING_FUNCTIONS[easing];
 
     // Move to start position
     this.sendPointerEvent(0, fromX, fromY);
-    await sleep(50);
+    if (startHoldMs > 0) await sleep(startHoldMs);
 
     // Press button down at start
     this.sendPointerEvent(1, fromX, fromY);
-    await sleep(50);
+    if (startHoldMs > 0) await sleep(startHoldMs);
 
     // Interpolate through intermediate points with easing
     for (let i = 1; i <= steps; i++) {
@@ -567,7 +569,7 @@ export class VncSession extends EventEmitter {
     }
 
     // Small pause before release so the target registers the drop
-    await sleep(50);
+    if (endHoldMs > 0) await sleep(endHoldMs);
 
     // Release button at destination
     this.sendPointerEvent(0, toX, toY);
