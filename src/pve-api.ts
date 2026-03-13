@@ -7,6 +7,7 @@
 
 import { httpRequest } from "./http.js";
 import type { PveAuthManager } from "./pve-auth.js";
+import { listVmDiskEntries, type VmDiskEntry } from "./pve-disk-config.js";
 
 export interface VncProxyResult {
   port: string;
@@ -26,7 +27,30 @@ export interface VmStatus {
   status: string;
   node: string;
   type: string;
+  tags: string[];
+}
+
+export interface VmConfig {
+  name?: string;
+  description?: string;
+  tags: string[];
+  disks: VmDiskEntry[];
+}
+
+interface RawVmStatus {
+  vmid: number;
+  name: string;
+  status: string;
+  node: string;
+  type: string;
   tags?: string;
+}
+
+interface RawVmConfig {
+  name?: string;
+  description?: string;
+  tags?: string;
+  [key: string]: unknown;
 }
 
 export interface Snapshot {
@@ -61,6 +85,33 @@ export interface GuestExecResult {
   exitcode: number;
   stdout: string;
   stderr: string;
+}
+
+const GUEST_EXEC_POLL_INTERVAL_MS = 1000;
+const DEFAULT_GUEST_EXEC_TIMEOUT_MS = 30_000;
+
+function parseVmTags(tags?: string): string[] {
+  if (!tags) return [];
+  return tags
+    .split(";")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+}
+
+function normalizeVmStatus(vm: RawVmStatus): VmStatus {
+  return {
+    ...vm,
+    tags: parseVmTags(vm.tags),
+  };
+}
+
+function normalizeVmConfig(config: RawVmConfig): VmConfig {
+  return {
+    name: config.name,
+    description: config.description,
+    tags: parseVmTags(config.tags),
+    disks: listVmDiskEntries(config),
+  };
 }
 
 export class PveApiClient {
@@ -172,6 +223,28 @@ export class PveApiClient {
     return this.request("GET", `/nodes/${node}/qemu/${vmid}/status/current`);
   }
 
+  async getVmConfig(node: string, vmid: number): Promise<VmConfig> {
+    const config = await this.request<RawVmConfig>("GET", `/nodes/${node}/qemu/${vmid}/config`);
+    return normalizeVmConfig(config);
+  }
+
+  async updateVmConfig(node: string, vmid: number, body: Record<string, string> | URLSearchParams): Promise<void> {
+    await this.request<null>("PUT", `/nodes/${node}/qemu/${vmid}/config`, body);
+  }
+
+  async setVmConfigValue(node: string, vmid: number, key: string, value: string): Promise<void> {
+    await this.updateVmConfig(node, vmid, { [key]: value });
+  }
+
+  async deleteVmConfigValue(node: string, vmid: number, key: string): Promise<void> {
+    await this.updateVmConfig(node, vmid, { delete: key });
+  }
+
+  async getVmDiskConfig(node: string, vmid: number): Promise<VmDiskEntry[]> {
+    const config = await this.getVmConfig(node, vmid);
+    return config.disks;
+  }
+
   async startVm(node: string, vmid: number): Promise<string> {
     const upid = await this.request<string>("POST", `/nodes/${node}/qemu/${vmid}/status/start`);
     await this.waitForTask(node, upid);
@@ -220,11 +293,13 @@ export class PveApiClient {
    * List all VMs across the cluster. Returns vmid, name, status, node, and tags.
    */
   async listVms(): Promise<VmStatus[]> {
-    const resources = await this.request<Array<{ vmid: number; name: string; status: string; node: string; type: string; tags?: string }>>(
+    const resources = await this.request<RawVmStatus[]>(
       "GET",
       "/cluster/resources?type=vm",
     );
-    return resources.filter((r) => r.type === "qemu");
+    return resources
+      .filter((r) => r.type === "qemu")
+      .map((vm) => normalizeVmStatus(vm));
   }
 
   /**
@@ -289,7 +364,7 @@ export class PveApiClient {
    * PVE 8+ expects command as a repeated form param: command[]=/bin/cmd&command[]=arg1&...
    * Requires qemu-guest-agent running in the VM and VM.GuestAgent.Unrestricted privilege.
    */
-  async guestExec(node: string, vmid: number, command: string, args?: string[]): Promise<GuestExecResult> {
+  async guestExec(node: string, vmid: number, command: string, args?: string[], timeoutMs = DEFAULT_GUEST_EXEC_TIMEOUT_MS): Promise<GuestExecResult> {
     const params = new URLSearchParams();
     params.append("command", command);
     if (args) {
@@ -305,9 +380,9 @@ export class PveApiClient {
     );
 
     // Poll for completion
-    const maxAttempts = 30;
+    const maxAttempts = Math.max(1, Math.ceil(timeoutMs / GUEST_EXEC_POLL_INTERVAL_MS));
     for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, GUEST_EXEC_POLL_INTERVAL_MS));
 
       const raw = await this.request<GuestExecRaw>(
         "GET",
@@ -325,6 +400,6 @@ export class PveApiClient {
       }
     }
 
-    throw new Error(`Guest exec command did not complete within ${maxAttempts} seconds`);
+    throw new Error(`Guest exec command did not complete within ${timeoutMs}ms`);
   }
 }
