@@ -15,6 +15,7 @@ import { dirname, resolve as resolvePath } from "node:path";
 
 import { PveAuthManager, loadCredentialsFromEnv } from "./pve-auth.js";
 import { PveApiClient } from "./pve-api.js";
+import type { VmStatus } from "./pve-api.js";
 import { VncSessionManager } from "./vnc-session.js";
 import { TerminalSessionManager } from "./terminal-session.js";
 import { captureScreenshot } from "./screenshot.js";
@@ -54,6 +55,41 @@ function resolveTermVmid(vmid?: number): number {
   if (vmid !== undefined) return vmid;
   if (activeTermVmid !== null) return activeTermVmid;
   throw new Error("No vmid provided and no active terminal session. Call serial_connect first.");
+}
+
+function formatVmTags(tags: string[]): string {
+  return tags.length > 0 ? tags.join(",") : "-";
+}
+
+function matchesVmFilters(
+  vm: VmStatus,
+  filters: {
+    vmids?: number[];
+    tags?: string[];
+    statuses?: string[];
+    name?: string;
+  },
+): boolean {
+  if (filters.vmids && !filters.vmids.includes(vm.vmid)) {
+    return false;
+  }
+
+  if (filters.tags && !filters.tags.some((tag) => vm.tags.includes(tag))) {
+    return false;
+  }
+
+  if (filters.statuses && !filters.statuses.includes(vm.status)) {
+    return false;
+  }
+
+  if (filters.name) {
+    const vmName = (vm.name ?? "").toLowerCase();
+    if (!vmName.includes(filters.name)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -396,6 +432,7 @@ const timelineActionSchema = z.discriminatedUnion("type", [
     node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
     command: z.string().min(1),
     args: z.array(z.string()).optional(),
+    timeout_ms: z.number().int().positive().default(30_000).describe("Command timeout in milliseconds"),
   }),
 ]);
 
@@ -700,23 +737,39 @@ server.registerTool("disconnect", {
 
 server.registerTool("list_vms", {
   title: "List VMs",
-  description: "List all QEMU virtual machines visible to the authenticated user. Shows vmid, name, status, node, and tags.",
-  inputSchema: {},
-}, async () => {
-  const vms = await api.listVms();
+  description: "List QEMU virtual machines visible to the authenticated user, optionally filtered by VM ID, tag, status, or name. Shows vmid, name, status, node, and tags.",
+  inputSchema: {
+    vmids: z.array(z.number().int().positive()).optional().describe("Optional list of exact VM IDs to include."),
+    tags: z.array(z.string().min(1)).optional().describe("Optional list of VM tags. A VM matches if it has any requested tag."),
+    statuses: z.array(z.string().min(1)).optional().describe("Optional list of VM status values to include (for example: running, stopped)."),
+    name: z.string().min(1).optional().describe("Optional case-insensitive substring filter for the VM name."),
+  },
+}, async ({ vmids, tags, statuses, name }) => {
+  const normalizedName = name?.trim().toLowerCase();
+  const normalizedTags = tags
+    ?.map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+  const normalizedStatuses = statuses
+    ?.map((status) => status.trim())
+    .filter((status) => status.length > 0);
+  const vms = (await api.listVms()).filter((vm) => matchesVmFilters(vm, {
+    vmids,
+    tags: normalizedTags && normalizedTags.length > 0 ? normalizedTags : undefined,
+    statuses: normalizedStatuses && normalizedStatuses.length > 0 ? normalizedStatuses : undefined,
+    name: normalizedName && normalizedName.length > 0 ? normalizedName : undefined,
+  }));
 
   if (vms.length === 0) {
     return {
       content: [{
         type: "text" as const,
-        text: "No VMs found (or no permissions to view any).",
+        text: "No VMs found for the requested filters (or no permissions to view any).",
       }],
     };
   }
 
   const lines = vms.map((vm) => {
-    const tags = vm.tags?.trim() || "-";
-    return `VM ${vm.vmid}: name=${vm.name ?? "unknown"}, status=${vm.status}, node=${vm.node}, tags=${tags}`;
+    return `VM ${vm.vmid}: name=${vm.name ?? "unknown"}, status=${vm.status}, node=${vm.node}, tags=${formatVmTags(vm.tags)}`;
   });
 
   return {
@@ -788,19 +841,120 @@ server.registerTool("vm_stop", {
 
 server.registerTool("vm_status", {
   title: "VM Status",
-  description: "Get the current status of a VM (running, stopped, etc). Requires VM.Audit privilege.",
+  description: "Get the current status of a VM, including tags. Requires VM.Audit privilege.",
   inputSchema: {
     vmid: z.number().int().positive().describe("VM ID"),
     node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
   },
 }, async ({ vmid, node }) => {
   const resolvedNode = node ?? await api.findVmNode(vmid);
-  const status = await api.getVmStatus(resolvedNode, vmid);
+  const [status, config] = await Promise.all([
+    api.getVmStatus(resolvedNode, vmid),
+    api.getVmConfig(resolvedNode, vmid),
+  ]);
 
   return {
     content: [{
       type: "text" as const,
-      text: `VM ${vmid}: status=${status.status}, qmpstatus=${status.qmpstatus ?? "n/a"}, name=${status.name ?? "unknown"}`,
+      text: `VM ${vmid}: status=${status.status}, qmpstatus=${status.qmpstatus ?? "n/a"}, name=${status.name ?? config.name ?? "unknown"}, tags=${formatVmTags(config.tags)}`,
+    }],
+  };
+});
+
+server.registerTool("vm_notes", {
+  title: "VM Notes",
+  description: "Read the VM notes/description from Proxmox config. Requires VM.Audit privilege.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  const config = await api.getVmConfig(resolvedNode, vmid);
+  const notes = config.description?.trim();
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: notes
+        ? `VM ${vmid} notes:\n${notes}`
+        : `VM ${vmid} has no notes set.`,
+    }],
+  };
+});
+
+server.registerTool("vm_disk_list", {
+  title: "List VM Disk Config",
+  description: "List disk-like VM config entries such as scsi0, virtio0, efidisk0, tpmstate0, and unusedN. Includes the raw config string for each entry.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  const disks = await api.getVmDiskConfig(resolvedNode, vmid);
+
+  if (disks.length === 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: `VM ${vmid} has no disk-like config entries.`,
+      }],
+    };
+  }
+
+  const lines = disks.map((disk) => {
+    const parsed = disk.parsed
+      ? ` storage=${disk.parsed.storage} volume=${disk.parsed.volume}`
+      : "";
+    return `${disk.key}: ${disk.spec}${parsed}`;
+  });
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} disk config on node ${resolvedNode}:\n${lines.join("\n")}`,
+    }],
+  };
+});
+
+server.registerTool("vm_disk_set", {
+  title: "Set VM Disk Config",
+  description: "Set a disk-like VM config entry such as scsi0, virtio0, efidisk0, tpmstate0, or unusedN to a raw Proxmox config string.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    disk: z.string().min(1).describe("Disk config key, for example scsi0, efidisk0, or unused0."),
+    value: z.string().min(1).describe("Raw Proxmox disk config value, for example local-lvm:0,efitype=4m."),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, disk, value, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.setVmConfigValue(resolvedNode, vmid, disk, value);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} updated ${disk} on node ${resolvedNode} to: ${value}`,
+    }],
+  };
+});
+
+server.registerTool("vm_config_delete", {
+  title: "Delete VM Config Entry",
+  description: "Delete a VM config entry through the Proxmox config API. This is commonly used for disk-like keys such as efidisk0 or unusedN.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    key: z.string().min(1).describe("VM config key to delete, for example efidisk0 or unused0."),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, key, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.deleteVmConfigValue(resolvedNode, vmid, key);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `VM ${vmid} deleted config key ${key} on node ${resolvedNode}`,
     }],
   };
 });
@@ -812,11 +966,12 @@ server.registerTool("exec_command", {
     vmid: z.number().int().positive().describe("VM ID"),
     command: z.string().min(1).describe("Command to execute (full path recommended, e.g. /usr/bin/ls). For env vars or shell features use /bin/bash -c."),
     args: z.array(z.string()).optional().describe("Command arguments (e.g. [\"--output\", \"Virtual-1\", \"--mode\", \"1280x720\"])"),
+    timeout_ms: z.number().int().positive().default(30_000).describe("Command timeout in milliseconds"),
     node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
   },
-}, async ({ vmid, command, args, node }) => {
+}, async ({ vmid, command, args, timeout_ms, node }) => {
   const resolvedNode = node ?? await api.findVmNode(vmid);
-  const result = await api.guestExec(resolvedNode, vmid, command, args);
+  const result = await api.guestExec(resolvedNode, vmid, command, args, timeout_ms);
 
   return {
     content: [{
@@ -1026,7 +1181,7 @@ server.registerTool("timeline", {
         case "exec_command": {
           const id = resolveTimelineVmid(action.vmid, vmid);
           const resolvedNode = action.node ?? await api.findVmNode(id);
-          const result = await api.guestExec(resolvedNode, id, action.command, action.args);
+          const result = await api.guestExec(resolvedNode, id, action.command, action.args, action.timeout_ms);
           message = `exec (${action.command}) exit=${result.exitcode}`;
           break;
         }
