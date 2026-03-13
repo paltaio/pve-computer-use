@@ -26,6 +26,7 @@ export interface VmStatus {
   status: string;
   node: string;
   type: string;
+  tags?: string;
 }
 
 export interface Snapshot {
@@ -216,10 +217,10 @@ export class PveApiClient {
   }
 
   /**
-   * List all VMs across the cluster. Returns vmid, name, status, and node.
+   * List all VMs across the cluster. Returns vmid, name, status, node, and tags.
    */
   async listVms(): Promise<VmStatus[]> {
-    const resources = await this.request<Array<{ vmid: number; name: string; status: string; node: string; type: string }>>(
+    const resources = await this.request<Array<{ vmid: number; name: string; status: string; node: string; type: string; tags?: string }>>(
       "GET",
       "/cluster/resources?type=vm",
     );
