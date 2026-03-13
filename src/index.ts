@@ -700,7 +700,7 @@ server.registerTool("disconnect", {
 
 server.registerTool("list_vms", {
   title: "List VMs",
-  description: "List all QEMU virtual machines visible to the authenticated user. Shows vmid, name, status, and node.",
+  description: "List all QEMU virtual machines visible to the authenticated user. Shows vmid, name, status, node, and tags.",
   inputSchema: {},
 }, async () => {
   const vms = await api.listVms();
@@ -714,9 +714,10 @@ server.registerTool("list_vms", {
     };
   }
 
-  const lines = vms.map((vm) =>
-    `VM ${vm.vmid}: name=${vm.name ?? "unknown"}, status=${vm.status}, node=${vm.node}`
-  );
+  const lines = vms.map((vm) => {
+    const tags = vm.tags?.trim() || "-";
+    return `VM ${vm.vmid}: name=${vm.name ?? "unknown"}, status=${vm.status}, node=${vm.node}, tags=${tags}`;
+  });
 
   return {
     content: [{
