@@ -883,6 +883,29 @@ server.registerTool("vm_notes", {
   };
 });
 
+server.registerTool("vm_notes_set", {
+  title: "Set VM Notes",
+  description: "Set the VM notes/description through the Proxmox config API. Pass an empty string to clear existing notes.",
+  inputSchema: {
+    vmid: z.number().int().positive().describe("VM ID"),
+    notes: z.string().describe("Notes text to store as the VM description. Use an empty string to clear it."),
+    node: z.string().optional().describe("PVE node name. Auto-detected if omitted."),
+  },
+}, async ({ vmid, notes, node }) => {
+  const resolvedNode = node ?? await api.findVmNode(vmid);
+  await api.setVmNotes(resolvedNode, vmid, notes);
+  const normalized = notes.trim();
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: normalized.length > 0
+        ? `VM ${vmid} notes updated on node ${resolvedNode}`
+        : `VM ${vmid} notes cleared on node ${resolvedNode}`,
+    }],
+  };
+});
+
 server.registerTool("vm_disk_list", {
   title: "List VM Disk Config",
   description: "List disk-like VM config entries such as scsi0, virtio0, efidisk0, tpmstate0, and unusedN. Includes the raw config string for each entry.",

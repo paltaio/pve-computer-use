@@ -240,6 +240,16 @@ export class PveApiClient {
     await this.updateVmConfig(node, vmid, { delete: key });
   }
 
+  async setVmNotes(node: string, vmid: number, notes: string): Promise<void> {
+    const normalized = notes.trim();
+    if (normalized.length === 0) {
+      await this.deleteVmConfigValue(node, vmid, "description");
+      return;
+    }
+
+    await this.setVmConfigValue(node, vmid, "description", notes);
+  }
+
   async getVmDiskConfig(node: string, vmid: number): Promise<VmDiskEntry[]> {
     const config = await this.getVmConfig(node, vmid);
     return config.disks;

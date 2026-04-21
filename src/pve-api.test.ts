@@ -89,3 +89,37 @@ test("deleteVmConfigValue sends delete payload", async () => {
   assert.equal(calls[0]?.path, "/nodes/pve/qemu/203/config");
   assert.deepEqual(calls[0]?.body, { delete: "unused0" });
 });
+
+test("setVmNotes writes description when notes are provided", async () => {
+  const client = createClient();
+  const calls: Array<{ method: string; path: string; body: Record<string, string> | URLSearchParams | undefined }> = [];
+
+  Reflect.set(client, "request", async (method: string, path: string, body?: Record<string, string> | URLSearchParams) => {
+    calls.push({ method, path, body });
+    return null;
+  });
+
+  await client.setVmNotes("pve", 204, "Install template for QA");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "PUT");
+  assert.equal(calls[0]?.path, "/nodes/pve/qemu/204/config");
+  assert.deepEqual(calls[0]?.body, { description: "Install template for QA" });
+});
+
+test("setVmNotes clears description when notes are empty", async () => {
+  const client = createClient();
+  const calls: Array<{ method: string; path: string; body: Record<string, string> | URLSearchParams | undefined }> = [];
+
+  Reflect.set(client, "request", async (method: string, path: string, body?: Record<string, string> | URLSearchParams) => {
+    calls.push({ method, path, body });
+    return null;
+  });
+
+  await client.setVmNotes("pve", 205, "   ");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "PUT");
+  assert.equal(calls[0]?.path, "/nodes/pve/qemu/205/config");
+  assert.deepEqual(calls[0]?.body, { delete: "description" });
+});
