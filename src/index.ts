@@ -21,6 +21,12 @@ import { TerminalSessionManager } from "./terminal-session.js";
 import { captureScreenshot } from "./screenshot.js";
 import { destroyDispatchers } from "./http.js";
 import { parseKeyCombo } from "./rfb.js";
+import {
+  GUIDANCE_TOPICS,
+  guidanceTopicIds,
+  guidanceTopicUri,
+  readGuidance,
+} from "./guidance.js";
 
 // --- State ---
 
@@ -905,6 +911,42 @@ server.registerTool("vm_notes_set", {
     }],
   };
 });
+
+server.registerTool("proxmox_guidance", {
+  title: "Proxmox Guidance",
+  description: "Read canonical operational guidance for common Proxmox VM flows exposed by this MCP, including EFI/Secure Boot handling.",
+  inputSchema: {
+    topic: z.enum(guidanceTopicIds).describe("Guidance topic to read."),
+  },
+}, async ({ topic }) => {
+  const text = await readGuidance(topic);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text,
+    }],
+  };
+});
+
+for (const topic of GUIDANCE_TOPICS) {
+  server.registerResource(
+    `guidance-${topic.id}`,
+    guidanceTopicUri(topic.id),
+    {
+      title: topic.title,
+      description: topic.description,
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [{
+        uri: uri.href,
+        mimeType: "text/markdown",
+        text: await readGuidance(topic.id),
+      }],
+    }),
+  );
+}
 
 server.registerTool("vm_disk_list", {
   title: "List VM Disk Config",
