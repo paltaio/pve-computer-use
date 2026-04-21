@@ -87,7 +87,8 @@ export interface GuestExecResult {
   stderr: string;
 }
 
-const GUEST_EXEC_POLL_INTERVAL_MS = 1000;
+const GUEST_EXEC_POLL_INITIAL_MS = 50;
+const GUEST_EXEC_POLL_MAX_MS = 1000;
 const DEFAULT_GUEST_EXEC_TIMEOUT_MS = 30_000;
 
 function parseVmTags(tags?: string): string[] {
@@ -389,10 +390,14 @@ export class PveApiClient {
       params,
     );
 
-    // Poll for completion
-    const maxAttempts = Math.max(1, Math.ceil(timeoutMs / GUEST_EXEC_POLL_INTERVAL_MS));
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((r) => setTimeout(r, GUEST_EXEC_POLL_INTERVAL_MS));
+    // Poll for completion with exponential backoff. Fast commands (the
+    // common case) finish within the first poll, so start at 50ms. Slower
+    // commands back off up to GUEST_EXEC_POLL_MAX_MS to keep long-running
+    // ops from hammering the API.
+    const deadline = Date.now() + timeoutMs;
+    let delay = GUEST_EXEC_POLL_INITIAL_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, delay));
 
       const raw = await this.request<GuestExecRaw>(
         "GET",
@@ -408,6 +413,8 @@ export class PveApiClient {
           stderr: errRaw,
         };
       }
+
+      delay = Math.min(delay * 2, GUEST_EXEC_POLL_MAX_MS);
     }
 
     throw new Error(`Guest exec command did not complete within ${timeoutMs}ms`);
