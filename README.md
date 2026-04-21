@@ -1,30 +1,30 @@
-# pve-vm-mcp
+# pve-computer-use
 
 MCP server for Proxmox VE VMs. Screenshot and input over VNC, text I/O over serial console, plus power, snapshots, backups, and guest-agent exec.
 
 ## Requirements
 
 - Node 18+
-- Proxmox VE 7.x or 8.x
+- Proxmox VE 8+
 - PVE user with at least `VM.Console` + `VM.Audit`
 
 ## Install
 
 ```bash
-git clone <repo-url> && cd pve-vm-mcp
+git clone <repo-url> && cd pve-computer-use
 npm install
 npm run build
 ```
 
 ## Configure
 
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `PVE_HOST` | yes | -- | PVE node/cluster |
-| `PVE_PORT` | no | `8006` | |
-| `PVE_USER` | yes | -- | e.g. `mcp-agent@pve` |
-| `PVE_PASSWORD` | yes | -- | |
-| `PVE_VERIFY_SSL` | no | `true` | `false` for self-signed |
+| Variable         | Required | Default | Notes                   |
+| ---------------- | -------- | ------- | ----------------------- |
+| `PVE_HOST`       | yes      | --      | PVE node/cluster        |
+| `PVE_PORT`       | no       | `8006`  |                         |
+| `PVE_USER`       | yes      | --      | e.g. `mcp-agent@pve`    |
+| `PVE_PASSWORD`   | yes      | --      |                         |
+| `PVE_VERIFY_SSL` | no       | `true`  | `false` for self-signed |
 
 MCP client config (`~/.claude/mcp_servers.json` or `claude_desktop_config.json`):
 
@@ -33,7 +33,7 @@ MCP client config (`~/.claude/mcp_servers.json` or `claude_desktop_config.json`)
   "mcpServers": {
     "pve-computer-use": {
       "command": "node",
-      "args": ["/path/to/pve-vm-mcp/dist/index.js"],
+      "args": ["/path/to/pve-computer-use/dist/index.js"],
       "env": {
         "PVE_HOST": "192.168.1.10",
         "PVE_USER": "mcp-agent@pve",
@@ -74,15 +74,15 @@ pveum acl modify /vms/100   --users mcp-agent@pve --roles MCPComputerUseFull
 pveum acl modify /storage   --users mcp-agent@pve --roles MCPComputerUseFull
 ```
 
-| Privilege | For |
-|---|---|
-| `VM.Console` | VNC + serial |
-| `VM.Audit` | status, list, snapshot list |
-| `VM.PowerMgmt` | start / stop / shutdown |
-| `VM.Snapshot` | snapshot ops |
-| `VM.Backup` | backup ops (per VM) |
-| `VM.GuestAgent.Unrestricted` | `exec_command` (needs qemu-guest-agent) |
-| `Datastore.Audit` / `Datastore.AllocateSpace` | backup list / create (on `/storage/*`) |
+| Privilege                                     | For                                     |
+| --------------------------------------------- | --------------------------------------- |
+| `VM.Console`                                  | VNC + serial                            |
+| `VM.Audit`                                    | status, list, snapshot list             |
+| `VM.PowerMgmt`                                | start / stop / shutdown                 |
+| `VM.Snapshot`                                 | snapshot ops                            |
+| `VM.Backup`                                   | backup ops (per VM)                     |
+| `VM.GuestAgent.Unrestricted`                  | `exec_command` (needs qemu-guest-agent) |
+| `Datastore.Audit` / `Datastore.AllocateSpace` | backup list / create (on `/storage/*`)  |
 
 ### Serial console
 
@@ -96,15 +96,15 @@ VNC tickets are VM-scoped and expire in ~40s. Auth tickets refresh before their 
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `401 authentication failed` | Test creds: `curl -k -d 'username=USER&password=PW' https://HOST:8006/api2/json/access/ticket` |
-| `Invalid PVEVNC Ticket` | Ticket expires in ~40s; retry |
-| `VM not found in cluster` | Wrong VMID or missing `VM.Audit` |
-| `WebSocket closed before handshake` | VM not running, or port 8006 blocked |
-| TLS errors | `PVE_VERIFY_SSL=false` |
-| Serial shows nothing | No `serial0` on VM, or no getty in guest |
+| Symptom                             | Fix                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `401 authentication failed`         | Test creds: `curl -k -d 'username=USER&password=PW' https://HOST:8006/api2/json/access/ticket` |
+| `Invalid PVEVNC Ticket`             | Ticket expires in ~40s; retry                                                                  |
+| `VM not found in cluster`           | Wrong VMID or missing `VM.Audit`                                                               |
+| `WebSocket closed before handshake` | VM not running, or port 8006 blocked                                                           |
+| TLS errors                          | `PVE_VERIFY_SSL=false`                                                                         |
+| Serial shows nothing                | No `serial0` on VM, or no getty in guest                                                       |
 
 ## License
 
-MIT
+Apache-2.0. See [LICENSE](LICENSE).

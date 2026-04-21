@@ -1,5 +1,5 @@
 {
-  "name": "pve-vm-mcp",
+  "name": "pve-computer-use",
   "version": "0.1.0",
   "description": "MCP server for AI computer use on Proxmox VE virtual machines via VNC",
   "type": "module",
@@ -16,7 +16,7 @@
     "vnc",
     "computer-use"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@xterm/addon-serialize": "^0.14.0",
