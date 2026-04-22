@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
+    "format": "oxfmt src",
+    "format:check": "oxfmt --check src",
     "test": "npm run build && node --test dist/**/*.test.js"
   },
   "keywords": [
@@ -30,6 +32,7 @@
   "devDependencies": {
     "@types/node": "^25.3.3",
     "@types/ws": "^8.18.1",
+    "oxfmt": "^0.46.0",
     "typescript": "^5.9.3"
   }
 }
