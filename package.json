@@ -6,6 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "build:rust": "cargo build --manifest-path recorder/Cargo.toml",
+    "build:rust:release": "cargo build --release --manifest-path recorder/Cargo.toml",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "format": "oxfmt src",

@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+recorder/target/
+recorder/.layer2-artifacts/
