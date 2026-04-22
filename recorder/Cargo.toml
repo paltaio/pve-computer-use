@@ -7,10 +7,9 @@ rust-version = "1.77"
 [dependencies]
 qemu-display = { version = "0.2.1", features = ["qmp"] }
 qapi = { version = "0.15", features = ["qmp"] }
-gstreamer = "0.23"
-gstreamer-app = "0.23"
-gstreamer-video = "0.23"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+openh264 = "0.9"
+mp4 = "0.14"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"

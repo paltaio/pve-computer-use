@@ -193,7 +193,6 @@ async fn run_with_backend(
     backend: &dyn RecorderBackend,
 ) -> Result<ExitCode, RunFailure> {
     preflight(&args).await?;
-    gstreamer::init().map_err(|error| RunFailure::Internal(anyhow!(error)))?;
 
     let shared = QemuSource::shared_state();
     let (tx, rx) = mpsc::channel(2);
@@ -207,6 +206,7 @@ async fn run_with_backend(
             output: args.output.clone(),
             fps: args.fps,
             quality: args.quality,
+            encoder: args.encoder,
         },
         shared,
         rx,
@@ -231,7 +231,7 @@ async fn run_with_backend(
         encoder.shutdown_now().await;
         return Err(RunFailure::Internal(anyhow!(error)));
     }
-    source_handle.send_eos();
+    source_handle.send_eos().await;
 
     match stop {
         StopReason::Encoder(EncoderTerminal::Fatal(message)) => {
@@ -398,6 +398,7 @@ mod tests {
             console: 0,
             fps: None,
             quality: crate::args::QualityMode::Best,
+            encoder: crate::args::EncoderMode::Openh264,
             verbose: false,
         }
         .resolve()

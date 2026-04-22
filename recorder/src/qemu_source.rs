@@ -476,8 +476,15 @@ impl ListenerState {
 }
 
 impl SourceHandle {
-    pub fn send_eos(&self) {
-        self.inner.emit_event(FrameEvent::Eos);
+    pub async fn send_eos(&self) {
+        match self.inner.tx.send(FrameEvent::Eos).await {
+            Ok(()) => {
+                self.inner.frames_pushed.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                warn!("encoder channel is closed");
+            }
+        }
     }
 
     pub fn non_shareable_path_detected(&self) -> bool {
@@ -499,6 +506,39 @@ impl SourceHandle {
             self.inner.frames_pushed.load(Ordering::Relaxed),
             self.inner.frames_dropped.load(Ordering::Relaxed),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_eos_waits_for_queue_capacity() {
+        let shared = QemuSource::shared_state();
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_base, _map, handle) = QemuSource::listeners(shared, tx);
+
+        handle
+            .inner
+            .tx
+            .try_send(FrameEvent::Frame { ts_ns: 1 })
+            .unwrap();
+
+        let send_task = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle.send_eos().await;
+            }
+        });
+
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, FrameEvent::Frame { .. }));
+
+        send_task.await.unwrap();
+
+        let second = rx.recv().await.unwrap();
+        assert!(matches!(second, FrameEvent::Eos));
     }
 }
 

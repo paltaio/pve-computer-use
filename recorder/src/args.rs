@@ -32,6 +32,9 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = QualityMode::Best)]
     pub quality: QualityMode,
 
+    #[arg(long, value_enum, default_value_t = EncoderMode::Auto)]
+    pub encoder: EncoderMode,
+
     #[arg(short, long, default_value_t = false)]
     pub verbose: bool,
 }
@@ -43,6 +46,13 @@ pub enum QualityMode {
     Realtime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EncoderMode {
+    Auto,
+    X264,
+    Openh264,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedArgs {
     pub vmid: u32,
@@ -52,6 +62,7 @@ pub struct ResolvedArgs {
     pub console: u32,
     pub fps: Option<u32>,
     pub quality: QualityMode,
+    pub encoder: EncoderMode,
     pub verbose: bool,
     pub config_path: PathBuf,
 }
@@ -102,6 +113,7 @@ impl Args {
             console: self.console,
             fps: self.fps,
             quality: self.quality,
+            encoder: self.encoder,
             verbose: self.verbose,
             config_path: config_path(self.vmid),
         })
@@ -230,6 +242,8 @@ mod tests {
             "60",
             "--quality",
             "realtime",
+            "--encoder",
+            "openh264",
         ])
         .unwrap();
 
@@ -238,6 +252,7 @@ mod tests {
         assert_eq!(resolved.duration, Some(Duration::from_secs(90)));
         assert_eq!(resolved.fps, Some(60));
         assert_eq!(resolved.quality, QualityMode::Realtime);
+        assert_eq!(resolved.encoder, EncoderMode::Openh264);
     }
 
     #[test]
