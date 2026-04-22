@@ -25,7 +25,7 @@ use args::{
     dbus_display_message, non_shareable_surface_message, protocol_unavailable_message, Args,
     ResolvedArgs,
 };
-use encoder::{Encoder, EncoderConfig, EncoderTerminal};
+use encoder::{Encoder, EncoderConfig, EncoderTerminal, Mp4Sink};
 use qemu_source::{BaseListener, MapListener, QemuSource};
 
 #[derive(Debug, Error)]
@@ -201,15 +201,18 @@ async fn run_with_backend(
         .register(&args, base, map)
         .await
         .map_err(RunFailure::Internal)?;
+    let sinks: Vec<Box<dyn encoder::EncodedOutputSink>> = vec![Box::new(
+        Mp4Sink::new(args.output.clone(), args.fps).map_err(anyhow::Error::from)?,
+    )];
     let mut encoder = Encoder::start(
         EncoderConfig {
-            output: args.output.clone(),
             fps: args.fps,
             quality: args.quality,
             encoder: args.encoder,
         },
         shared,
         rx,
+        sinks,
     )
     .map_err(|error| RunFailure::Internal(error.into()))?;
 
