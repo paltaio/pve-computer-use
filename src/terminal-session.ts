@@ -10,10 +10,8 @@
 
 import WebSocket from 'ws'
 import { EventEmitter } from 'events'
-import xtermHeadless from '@xterm/headless'
-const { Terminal } = xtermHeadless
-import addonSerialize from '@xterm/addon-serialize'
-const { SerializeAddon } = addonSerialize
+import { Terminal } from '@xterm/headless'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import type { PveApiClient } from './pve-api.js'
 
 /** Map of key combo names to terminal escape sequences. */
