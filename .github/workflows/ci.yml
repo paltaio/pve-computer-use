@@ -26,4 +26,7 @@ jobs:
         run: bun run build
 
       - name: Tests
-        run: node --test "dist/**/*.test.js"
+        shell: bash
+        run: |
+          shopt -s globstar
+          node --test dist/**/*.test.js
