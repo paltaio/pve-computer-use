@@ -4,16 +4,33 @@ MCP server for Proxmox VE VMs. Screenshot and input over VNC, text I/O over seri
 
 ## Requirements
 
-- Node 18+
 - Proxmox VE 8+
 - PVE user with at least `VM.Console` + `VM.Audit`
 
 ## Install
 
+Download from the [latest release](https://github.com/paltaio/pve-computer-use/releases/latest):
+
+```bash
+curl -L -o pve-computer-use https://github.com/paltaio/pve-computer-use/releases/latest/download/pve-computer-use-linux-x64
+chmod +x pve-computer-use
+```
+
+Assets: `pve-computer-use-{linux,darwin}-{x64,arm64}`, `pve-computer-use-windows-x64.exe`.
+
+### Build from source
+
 ```bash
 git clone <repo-url> && cd pve-computer-use
-npm install
-npm run build
+bun install
+bun build --compile --target=bun-linux-x64 --outfile=dist/pve-computer-use src/index.ts
+```
+
+Or build to JS for Node:
+
+```bash
+bun run build
+node dist/index.js
 ```
 
 ## Configure
@@ -32,8 +49,7 @@ MCP client config (`~/.claude/mcp_servers.json` or `claude_desktop_config.json`)
 {
   "mcpServers": {
     "pve-computer-use": {
-      "command": "node",
-      "args": ["/path/to/pve-computer-use/dist/index.js"],
+      "command": "/path/to/pve-computer-use",
       "env": {
         "PVE_HOST": "192.168.1.10",
         "PVE_USER": "mcp-agent@pve",
