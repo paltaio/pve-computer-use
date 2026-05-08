@@ -27,10 +27,7 @@ export async function captureScreenshot(
 	// PVE VNC pixel format: BGRX. jpeg-js expects RGBA.
 	const rgbaBuffer = swapRedBlue(fb.buffer, width * height)
 
-	const { data: jpegBuffer } = encodeJpeg(
-		{ data: rgbaBuffer, width, height },
-		quality,
-	)
+	const { data: jpegBuffer } = encodeJpeg({ data: rgbaBuffer, width, height }, quality)
 
 	return {
 		data: jpegBuffer.toString('base64'),
