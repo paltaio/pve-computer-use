@@ -4,7 +4,7 @@
  * Converts the RGBA framebuffer to JPEG at native resolution.
  */
 
-import sharp from 'sharp'
+import { encode as encodeJpeg } from 'jpeg-js'
 import type { Framebuffer } from './framebuffer.js'
 
 export interface Screenshot {
@@ -24,15 +24,13 @@ export async function captureScreenshot(
 ): Promise<Screenshot> {
 	const { width, height } = fb
 
-	// PVE VNC pixel format: BGRX (red-shift=16, green-shift=8, blue-shift=0)
-	// sharp expects RGBA, so swap R and B channels
+	// PVE VNC pixel format: BGRX. jpeg-js expects RGBA.
 	const rgbaBuffer = swapRedBlue(fb.buffer, width * height)
 
-	const jpegBuffer = await sharp(rgbaBuffer, {
-		raw: { width, height, channels: 4 },
-	})
-		.jpeg({ quality, mozjpeg: true })
-		.toBuffer()
+	const { data: jpegBuffer } = encodeJpeg(
+		{ data: rgbaBuffer, width, height },
+		quality,
+	)
 
 	return {
 		data: jpegBuffer.toString('base64'),
@@ -41,10 +39,6 @@ export async function captureScreenshot(
 	}
 }
 
-/**
- * Swap R and B channels in a 4-byte-per-pixel buffer.
- * PVE VNC sends pixels as [B, G, R, X] but sharp expects [R, G, B, A].
- */
 function swapRedBlue(buffer: Buffer, pixelCount: number): Buffer {
 	const out = Buffer.from(buffer)
 	for (let i = 0; i < pixelCount; i++) {
@@ -53,7 +47,7 @@ function swapRedBlue(buffer: Buffer, pixelCount: number): Buffer {
 		const r = out[offset + 2]
 		out[offset] = r
 		out[offset + 2] = b
-		out[offset + 3] = 255 // ensure alpha is opaque
+		out[offset + 3] = 255
 	}
 	return out
 }
