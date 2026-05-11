@@ -61,7 +61,7 @@ await vm.kvm.press('ctrl+s')
 schedule with absolute timing, or repeat. `act.*` returns plain data:
 
 ```ts
-import pve, { act } from '<repo>/skill/index.ts'
+import pve, { act } from '<absolute-path-to-repo>/skill/index.ts'
 const vm = pve.use(100)
 
 await vm.run([

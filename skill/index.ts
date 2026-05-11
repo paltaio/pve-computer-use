@@ -4,7 +4,7 @@
  * Default export is a lazy singleton initialised from PVE_HOST / PVE_USER /
  * PVE_PASSWORD / PVE_PORT / PVE_VERIFY_SSL on first use.
  *
- *   import pve, { act } from '<repo>/skill/index.ts'
+ *   import pve, { act } from '<absolute-path-to-repo>/skill/index.ts'
  *   const vm = pve.use(100)
  *   await vm.start()
  *   await vm.kvm.press('ctrl+alt+t')
