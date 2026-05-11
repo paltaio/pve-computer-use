@@ -1,0 +1,710 @@
+/**
+ * pve-vm skill — scriptable Proxmox VE KVM/guest-agent automation.
+ *
+ * Default export is a lazy singleton initialised from PVE_HOST / PVE_USER /
+ * PVE_PASSWORD / PVE_PORT / PVE_VERIFY_SSL on first use.
+ *
+ *   import pve, { act } from '<repo>/skill/index.ts'
+ *   const vm = pve.use(100)
+ *   await vm.start()
+ *   await vm.kvm.press('ctrl+alt+t')
+ */
+
+import { writeFile } from 'node:fs/promises'
+
+import { PveAuthManager, loadCredentialsFromEnv } from '../src/pve-auth.js'
+import { PveApiClient } from '../src/pve-api.js'
+import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../src/vnc-session.js'
+import { TerminalSessionManager } from '../src/terminal-session.js'
+import { captureScreenshot } from '../src/screenshot.js'
+import { isWindowsGuest, typeTextWindowsClipboard } from '../src/windows-guest.js'
+import { parseKeyCombo } from '../src/rfb.js'
+import { mouseButtonToBit, sleep } from '../src/helpers.js'
+import { destroyDispatchers } from '../src/http.js'
+
+// ---------- Types ----------
+
+export type MouseButton = 'left' | 'right' | 'middle'
+export type TypeStrategy = 'auto' | 'clipboard' | 'vnc'
+export type VmRunState = 'running' | 'stopped' | 'paused' | 'suspended'
+
+export interface TypeOptions {
+	/** Chars per second (overrides delayMs). */
+	cps?: number
+	/** Milliseconds between characters. Default 8. */
+	delayMs?: number
+	/** Default 'en-US'. */
+	layout?: KeyboardLayout
+	/** 'auto' tries clipboard on Windows then falls back to VNC keys. */
+	strategy?: TypeStrategy
+}
+
+export interface MoveOptions {
+	/** Animate from current position. Default: jump. */
+	from?: 'current'
+	durationMs?: number
+	steps?: number
+	easing?: EasingType
+	signal?: AbortSignal
+}
+
+export interface DragOptions {
+	from: [number, number]
+	to: [number, number]
+	durationMs?: number
+	steps?: number
+	easing?: EasingType
+	holdStartMs?: number
+	holdEndMs?: number
+}
+
+export interface ScrollOptions {
+	direction: 'up' | 'down'
+	amount?: number
+}
+
+export interface WaitForOptions {
+	timeoutMs?: number
+	intervalMs?: number
+	signal?: AbortSignal
+}
+
+// ---------- Action descriptors (data, runnable by run/timeline) ----------
+
+export type Step =
+	| { kind: 'wait'; ms: number }
+	| { kind: 'press'; combo: string }
+	| { kind: 'down'; combo: string }
+	| { kind: 'up'; combo: string }
+	| { kind: 'releaseAll' }
+	| { kind: 'type'; text: string; opts?: TypeOptions }
+	| { kind: 'move'; x: number; y: number; opts?: MoveOptions }
+	| { kind: 'click'; x: number; y: number; button?: MouseButton; holdMs?: number }
+	| { kind: 'doubleClick'; x: number; y: number; button?: MouseButton }
+	| { kind: 'mouseDown'; button: MouseButton; x?: number; y?: number }
+	| { kind: 'mouseUp'; button: MouseButton | 'all'; x?: number; y?: number }
+	| { kind: 'drag'; opts: DragOptions }
+	| { kind: 'scroll'; x: number; y: number; opts: ScrollOptions }
+	| { kind: 'path'; points: [number, number][]; opts?: Omit<MoveOptions, 'from'> }
+	| { kind: 'exec'; fn: (vm: Vm) => unknown | Promise<unknown> }
+
+export const act = {
+	wait: (ms: number): Step => ({ kind: 'wait', ms }),
+	press: (combo: string): Step => ({ kind: 'press', combo }),
+	down: (combo: string): Step => ({ kind: 'down', combo }),
+	up: (combo: string): Step => ({ kind: 'up', combo }),
+	releaseAll: (): Step => ({ kind: 'releaseAll' }),
+	type: (text: string, opts?: TypeOptions): Step => ({ kind: 'type', text, opts }),
+	move: (x: number, y: number, opts?: MoveOptions): Step => ({ kind: 'move', x, y, opts }),
+	click: (x: number, y: number, button: MouseButton = 'left', holdMs?: number): Step => ({
+		kind: 'click',
+		x,
+		y,
+		button,
+		holdMs,
+	}),
+	doubleClick: (x: number, y: number, button: MouseButton = 'left'): Step => ({
+		kind: 'doubleClick',
+		x,
+		y,
+		button,
+	}),
+	mouseDown: (button: MouseButton, x?: number, y?: number): Step => ({
+		kind: 'mouseDown',
+		button,
+		x,
+		y,
+	}),
+	mouseUp: (button: MouseButton | 'all' = 'all', x?: number, y?: number): Step => ({
+		kind: 'mouseUp',
+		button,
+		x,
+		y,
+	}),
+	drag: (opts: DragOptions): Step => ({ kind: 'drag', opts }),
+	scroll: (x: number, y: number, opts: ScrollOptions): Step => ({ kind: 'scroll', x, y, opts }),
+	path: (points: [number, number][], opts?: Omit<MoveOptions, 'from'>): Step => ({
+		kind: 'path',
+		points,
+		opts,
+	}),
+	exec: (fn: (vm: Vm) => unknown | Promise<unknown>): Step => ({ kind: 'exec', fn }),
+}
+
+export interface TimelineStep {
+	/** Absolute offset from timeline start (ms). Steps without `at` run after the previous. */
+	at?: number
+	do: Step
+}
+
+export interface RunOptions {
+	releaseOnExit?: boolean
+	signal?: AbortSignal
+}
+
+export interface RepeatOptions {
+	times?: number
+	durationMs?: number
+	/** Inverse of intervalMs; one of the two is required. */
+	ratePerSec?: number
+	intervalMs?: number
+	jitterMs?: number
+	signal?: AbortSignal
+}
+
+// ---------- Singleton runtime ----------
+
+class Runtime {
+	auth?: PveAuthManager
+	api?: PveApiClient
+	sessions?: VncSessionManager
+	terms?: TerminalSessionManager
+	private initPromise?: Promise<void>
+	private cleanupInstalled = false
+	private disposed = false
+
+	async ensure(): Promise<void> {
+		if (this.api) return
+		if (!this.initPromise) this.initPromise = this.init()
+		await this.initPromise
+	}
+
+	private async init(): Promise<void> {
+		const auth = new PveAuthManager(loadCredentialsFromEnv())
+		await auth.authenticate()
+		const api = new PveApiClient(auth)
+		this.auth = auth
+		this.api = api
+		this.sessions = new VncSessionManager(api)
+		this.terms = new TerminalSessionManager(api)
+		this.installCleanup()
+	}
+
+	private installCleanup(): void {
+		if (this.cleanupInstalled) return
+		this.cleanupInstalled = true
+		const cleanup = () => {
+			if (this.disposed) return
+			this.disposed = true
+			this.sessions?.disconnectAll()
+			this.terms?.disconnectAll()
+			this.auth?.destroy()
+			destroyDispatchers()
+		}
+		process.once('exit', cleanup)
+		process.once('SIGINT', () => {
+			cleanup()
+			process.exit(130)
+		})
+		process.once('SIGTERM', () => {
+			cleanup()
+			process.exit(143)
+		})
+	}
+
+	async disconnect(): Promise<void> {
+		this.disposed = true
+		this.sessions?.disconnectAll()
+		this.terms?.disconnectAll()
+		this.auth?.destroy()
+		destroyDispatchers()
+	}
+}
+
+const rt = new Runtime()
+
+// ---------- Per-VM held state for safe cleanup ----------
+
+interface HeldState {
+	keys: Set<number>
+	mask: number
+	pointer: { x: number; y: number }
+}
+
+const held: Map<number, HeldState> = new Map()
+
+function getHeld(vmid: number): HeldState {
+	let s = held.get(vmid)
+	if (!s) {
+		s = { keys: new Set(), mask: 0, pointer: { x: 0, y: 0 } }
+		held.set(vmid, s)
+	}
+	return s
+}
+
+async function getSession(vmid: number, node?: string): Promise<VncSession> {
+	await rt.ensure()
+	const mgr = rt.sessions!
+	const existing = mgr.getSession(vmid)
+	if (existing?.connected) return existing
+	return mgr.connect(vmid, node)
+}
+
+// ---------- Vm handle ----------
+
+export class Vm {
+	readonly id: number
+
+	constructor(id: number) {
+		this.id = id
+	}
+
+	// Lifecycle
+	async status(): Promise<{ status: string; name?: string; qmpstatus?: string }> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		return rt.api!.getVmStatus(node, this.id)
+	}
+
+	async start(): Promise<void> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		await rt.api!.startVm(node, this.id)
+	}
+
+	async shutdown(): Promise<void> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		await rt.api!.shutdownVm(node, this.id)
+	}
+
+	async stop(): Promise<void> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		await rt.api!.stopVm(node, this.id)
+	}
+
+	async reset(): Promise<void> {
+		await this.stop()
+		await this.start()
+	}
+
+	async waitFor(state: VmRunState, opts: WaitForOptions = {}): Promise<void> {
+		const timeoutMs = opts.timeoutMs ?? 60_000
+		const intervalMs = opts.intervalMs ?? 1_000
+		const deadline = Date.now() + timeoutMs
+		for (;;) {
+			opts.signal?.throwIfAborted()
+			const cur = await this.status()
+			if (cur.status === state) return
+			if (Date.now() >= deadline) {
+				throw new Error(`VM ${this.id} did not reach state '${state}' within ${timeoutMs}ms (last: ${cur.status})`)
+			}
+			await sleep(intervalMs)
+		}
+	}
+
+	// Guest agent
+	guest = {
+		exec: async (
+			command: string,
+			args?: string[],
+			opts: { timeoutMs?: number } = {},
+		): Promise<{ exitcode: number; stdout: string; stderr: string }> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.guestExec(node, this.id, command, args, opts.timeoutMs)
+		},
+	}
+
+	// Snapshots
+	snapshot = {
+		list: async () => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.listSnapshots(node, this.id)
+		},
+		create: async (name: string, description?: string): Promise<void> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			await rt.api!.createSnapshot(node, this.id, name, description)
+		},
+		delete: async (name: string): Promise<void> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			await rt.api!.deleteSnapshot(node, this.id, name)
+		},
+		rollback: async (name: string): Promise<void> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			await rt.api!.rollbackSnapshot(node, this.id, name)
+		},
+	}
+
+	// Screenshot — saves to disk if path given, otherwise returns Buffer
+	async screenshot(): Promise<Buffer>
+	async screenshot(path: string, quality?: number): Promise<void>
+	async screenshot(path?: string, quality = 85): Promise<Buffer | void> {
+		const session = await getSession(this.id)
+		await session.waitForUpdate(3_000)
+		if (!session.screen) throw new Error('framebuffer not ready')
+		const shot = await captureScreenshot(session.screen, quality)
+		const buf = Buffer.from(shot.data, 'base64')
+		if (path) {
+			await writeFile(path, buf)
+			return
+		}
+		return buf
+	}
+
+	// KVM — immediate
+	kvm = {
+		press: async (combo: string): Promise<void> => {
+			const session = await getSession(this.id)
+			session.pressKey(combo)
+		},
+		down: async (combo: string): Promise<void> => {
+			const session = await getSession(this.id)
+			const keysyms = parseKeyCombo(combo)
+			const state = getHeld(this.id)
+			for (const k of keysyms) {
+				session.sendKeyEvent(true, k)
+				state.keys.add(k)
+			}
+		},
+		up: async (combo: string): Promise<void> => {
+			const session = await getSession(this.id)
+			const keysyms = parseKeyCombo(combo)
+			const state = getHeld(this.id)
+			for (let i = keysyms.length - 1; i >= 0; i--) {
+				session.sendKeyEvent(false, keysyms[i])
+				state.keys.delete(keysyms[i])
+			}
+		},
+		releaseAll: async (): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			const keys = Array.from(state.keys)
+			for (let i = keys.length - 1; i >= 0; i--) session.sendKeyEvent(false, keys[i])
+			state.keys.clear()
+			if (state.mask !== 0) {
+				session.sendPointerEvent(0, state.pointer.x, state.pointer.y)
+				state.mask = 0
+			}
+		},
+		type: async (text: string, opts: TypeOptions = {}): Promise<void> => {
+			const session = await getSession(this.id)
+			const delayMs = opts.cps ? Math.round(1000 / opts.cps) : (opts.delayMs ?? 8)
+			const layout = opts.layout ?? 'en-US'
+			const strategy = opts.strategy ?? 'auto'
+			await typeWithStrategy(this.id, session, text, layout, delayMs, strategy)
+		},
+		move: async (x: number, y: number, opts: MoveOptions = {}): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			if (opts.from === 'current') {
+				await animateMove(session, state, x, y, opts)
+			} else {
+				session.sendPointerEvent(state.mask, x, y)
+				state.pointer = { x, y }
+			}
+		},
+		click: async (x: number, y: number, button: MouseButton = 'left', holdMs = 0): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			const bit = mouseButtonToBit(button)
+			session.sendPointerEvent(state.mask, x, y)
+			session.sendPointerEvent(state.mask | bit, x, y)
+			if (holdMs > 0) await sleep(holdMs)
+			session.sendPointerEvent(state.mask, x, y)
+			state.pointer = { x, y }
+		},
+		doubleClick: async (x: number, y: number, button: MouseButton = 'left'): Promise<void> => {
+			await this.kvm.click(x, y, button)
+			await sleep(40)
+			await this.kvm.click(x, y, button)
+		},
+		mouseDown: async (button: MouseButton, x?: number, y?: number): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			const px = x ?? state.pointer.x
+			const py = y ?? state.pointer.y
+			const newMask = state.mask | mouseButtonToBit(button)
+			session.sendPointerEvent(newMask, px, py)
+			state.mask = newMask
+			state.pointer = { x: px, y: py }
+		},
+		mouseUp: async (button: MouseButton | 'all' = 'all', x?: number, y?: number): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			const px = x ?? state.pointer.x
+			const py = y ?? state.pointer.y
+			const newMask = button === 'all' ? 0 : state.mask & ~mouseButtonToBit(button)
+			session.sendPointerEvent(newMask, px, py)
+			state.mask = newMask
+			state.pointer = { x: px, y: py }
+		},
+		drag: async (opts: DragOptions): Promise<void> => {
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			await session.drag(
+				opts.from[0],
+				opts.from[1],
+				opts.to[0],
+				opts.to[1],
+				opts.steps ?? 20,
+				opts.durationMs ?? 500,
+				opts.easing ?? 'ease-in-out',
+				opts.holdStartMs ?? 50,
+				opts.holdEndMs ?? 50,
+			)
+			state.pointer = { x: opts.to[0], y: opts.to[1] }
+			state.mask = 0
+		},
+		scroll: async (x: number, y: number, opts: ScrollOptions): Promise<void> => {
+			const session = await getSession(this.id)
+			session.scroll(x, y, opts.direction, opts.amount ?? 3)
+			const state = getHeld(this.id)
+			state.pointer = { x, y }
+		},
+		path: async (points: [number, number][], opts: Omit<MoveOptions, 'from'> = {}): Promise<void> => {
+			if (points.length === 0) return
+			const session = await getSession(this.id)
+			const state = getHeld(this.id)
+			for (const [x, y] of points) {
+				await animateMove(session, state, x, y, opts)
+			}
+		},
+	}
+
+	// --- Composition ---
+
+	async do(step: Step, signal?: AbortSignal): Promise<void> {
+		await runStep(this, step, signal)
+	}
+
+	async run(steps: Step[], opts: RunOptions = {}): Promise<void> {
+		const release = opts.releaseOnExit ?? true
+		try {
+			for (const step of steps) {
+				opts.signal?.throwIfAborted()
+				await runStep(this, step, opts.signal)
+			}
+		} finally {
+			if (release) await this.kvm.releaseAll().catch(() => {})
+		}
+	}
+
+	async timeline(steps: TimelineStep[], opts: RunOptions = {}): Promise<void> {
+		const release = opts.releaseOnExit ?? true
+		const ordered = steps.slice().sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity))
+		const start = Date.now()
+		try {
+			for (const step of ordered) {
+				opts.signal?.throwIfAborted()
+				if (step.at !== undefined) {
+					const delay = step.at - (Date.now() - start)
+					if (delay > 0) await sleep(delay)
+				}
+				await runStep(this, step.do, opts.signal)
+			}
+		} finally {
+			if (release) await this.kvm.releaseAll().catch(() => {})
+		}
+	}
+
+	async repeat(step: Step, opts: RepeatOptions): Promise<void> {
+		const interval = opts.intervalMs ?? (opts.ratePerSec ? 1000 / opts.ratePerSec : undefined)
+		if (interval === undefined) throw new Error('repeat requires intervalMs or ratePerSec')
+		const start = Date.now()
+		const deadline = opts.durationMs ? start + opts.durationMs : Infinity
+		const maxCount = opts.times ?? Infinity
+		let count = 0
+		while (count < maxCount && Date.now() < deadline) {
+			opts.signal?.throwIfAborted()
+			await runStep(this, step, opts.signal)
+			count++
+			const jitter = opts.jitterMs ? Math.random() * opts.jitterMs : 0
+			const sleepMs = interval + jitter
+			const remaining = deadline - Date.now()
+			if (count >= maxCount) break
+			await sleep(Math.min(sleepMs, Math.max(0, remaining)))
+		}
+	}
+
+	async waitForScreenChange(timeoutMs = 3_000): Promise<void> {
+		const session = await getSession(this.id)
+		await session.waitForUpdate(timeoutMs)
+	}
+
+	async disconnectVnc(): Promise<void> {
+		await rt.ensure()
+		rt.sessions!.disconnect(this.id)
+		held.delete(this.id)
+	}
+}
+
+// ---------- Step runner ----------
+
+async function runStep(vm: Vm, step: Step, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted()
+	switch (step.kind) {
+		case 'wait':
+			await sleep(step.ms)
+			return
+		case 'press':
+			await vm.kvm.press(step.combo)
+			return
+		case 'down':
+			await vm.kvm.down(step.combo)
+			return
+		case 'up':
+			await vm.kvm.up(step.combo)
+			return
+		case 'releaseAll':
+			await vm.kvm.releaseAll()
+			return
+		case 'type':
+			await vm.kvm.type(step.text, step.opts)
+			return
+		case 'move':
+			await vm.kvm.move(step.x, step.y, step.opts)
+			return
+		case 'click':
+			await vm.kvm.click(step.x, step.y, step.button, step.holdMs)
+			return
+		case 'doubleClick':
+			await vm.kvm.doubleClick(step.x, step.y, step.button)
+			return
+		case 'mouseDown':
+			await vm.kvm.mouseDown(step.button, step.x, step.y)
+			return
+		case 'mouseUp':
+			await vm.kvm.mouseUp(step.button, step.x, step.y)
+			return
+		case 'drag':
+			await vm.kvm.drag(step.opts)
+			return
+		case 'scroll':
+			await vm.kvm.scroll(step.x, step.y, step.opts)
+			return
+		case 'path':
+			await vm.kvm.path(step.points, step.opts)
+			return
+		case 'exec':
+			await step.fn(vm)
+			return
+	}
+}
+
+// ---------- Mouse animation ----------
+
+const EASINGS: Record<EasingType, (t: number) => number> = {
+	linear: (t) => t,
+	'ease-in': (t) => t * t,
+	'ease-out': (t) => t * (2 - t),
+	'ease-in-out': (t) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t),
+}
+
+async function animateMove(
+	session: VncSession,
+	state: HeldState,
+	x: number,
+	y: number,
+	opts: Omit<MoveOptions, 'from'> = {},
+): Promise<void> {
+	const steps = opts.steps ?? 20
+	const durationMs = opts.durationMs ?? 250
+	const ease = EASINGS[opts.easing ?? 'ease-in-out']
+	const fromX = state.pointer.x
+	const fromY = state.pointer.y
+	const stepDelay = durationMs / steps
+	for (let i = 1; i <= steps; i++) {
+		opts.signal?.throwIfAborted()
+		const t = ease(i / steps)
+		const ix = Math.round(fromX + (x - fromX) * t)
+		const iy = Math.round(fromY + (y - fromY) * t)
+		session.sendPointerEvent(state.mask, ix, iy)
+		if (stepDelay > 0) await sleep(stepDelay)
+	}
+	state.pointer = { x, y }
+}
+
+// ---------- Type strategy ----------
+
+async function typeWithStrategy(
+	vmid: number,
+	session: VncSession,
+	text: string,
+	layout: KeyboardLayout,
+	delayMs: number,
+	strategy: TypeStrategy,
+): Promise<void> {
+	if (strategy === 'vnc') {
+		await session.typeText(text, layout, delayMs)
+		return
+	}
+	const node = session.node
+	const windows = await isWindowsGuest(rt.api!, node, vmid)
+	if (strategy === 'clipboard' || (strategy === 'auto' && windows)) {
+		if (!windows) {
+			await session.typeText(text, layout, delayMs)
+			return
+		}
+		try {
+			await typeTextWindowsClipboard(rt.api!, node, vmid, text)
+			session.pressKey('ctrl+v')
+			await sleep(120)
+			return
+		} catch {
+			await session.typeText(text, layout, delayMs)
+			return
+		}
+	}
+	await session.typeText(text, layout, delayMs)
+}
+
+// ---------- Parallel composition ----------
+
+export async function all<T>(tasks: Iterable<Promise<T>>): Promise<T[]> {
+	return Promise.all(tasks)
+}
+
+export async function race<T>(
+	tasks: Iterable<Promise<T>>,
+	controller?: AbortController,
+): Promise<T> {
+	const ctrl = controller ?? new AbortController()
+	const arr = Array.from(tasks)
+	try {
+		return await Promise.race(arr)
+	} finally {
+		ctrl.abort()
+	}
+}
+
+// ---------- Default export: the singleton facade ----------
+
+const pve = {
+	/** Return a bound handle. Does not connect; first KVM call connects on demand. */
+	use(vmid: number): Vm {
+		return new Vm(vmid)
+	},
+	/** List all VMs across the cluster. */
+	async list() {
+		await rt.ensure()
+		return rt.api!.listVms()
+	},
+	/** Sleep — convenient for ad-hoc scripts. */
+	wait: sleep,
+	/** Parallel: resolve when all resolve, reject on first error. */
+	all,
+	/**
+	 * Parallel: resolve when first resolves; aborts the supplied controller
+	 * so cooperating tasks can stop themselves.
+	 */
+	race,
+	/** Explicit init (rarely needed — first call auto-initialises). */
+	async connect() {
+		await rt.ensure()
+	},
+	/** Tear down all sessions and HTTP pools. */
+	async disconnect() {
+		await rt.disconnect()
+	},
+	get api() {
+		return rt.api
+	},
+}
+
+export default pve
