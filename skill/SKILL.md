@@ -46,6 +46,30 @@ The library is lazy: the first call authenticates and opens whatever sessions
 it needs. Held keys and mouse buttons are auto-released on error and on process
 exit, so an interrupted script never leaves stuck modifiers.
 
+## One-shot vs file
+
+Prefer inline `bun -e` for one-shots; don't litter `/tmp` for three lines:
+
+```sh
+bun -e 'import pve from "<absolute-path-to-repo>/skill/index.ts"; const v = pve.use(100); console.log(await v.status()); await pve.disconnect()'
+```
+
+Multi-line one-shots: heredoc into `bun -`:
+
+```sh
+bun - <<'EOF'
+import pve from '<absolute-path-to-repo>/skill/index.ts'
+const vm = pve.use(100)
+await vm.kvm.press('ctrl+alt+t')
+await pve.disconnect()
+EOF
+```
+
+Only write a real file when the script is large or you'll reuse it many times.
+When you do, allocate a session-stable path once (`mktemp /tmp/pve-vm-XXXXXX`,
+or a fixed `/tmp/pve-vm-<tag>.ts`) and keep editing the same path across calls
+so it survives for the rest of the Claude/Codex/OpenCode session.
+
 ## Two ways to write flows
 
 **Imperative** — most scripts. Each call fires:
