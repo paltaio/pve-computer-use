@@ -17,10 +17,14 @@ import { PveApiClient } from '../src/pve-api.js'
 import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../src/vnc-session.js'
 import { TerminalSessionManager } from '../src/terminal-session.js'
 import { captureScreenshot } from '../src/screenshot.js'
+import { matchScreen, type ScreenMatchOptions, type ScreenMatchResult } from '../src/screen-match.js'
 import { isWindowsGuest, typeTextWindowsClipboard } from '../src/windows-guest.js'
 import { parseKeyCombo } from '../src/rfb.js'
 import { mouseButtonToBit, sleep } from '../src/helpers.js'
 import { destroyDispatchers } from '../src/http.js'
+import { shutdownOcr } from '../src/ocr.js'
+
+if (process.env.PVE_VERIFY_SSL !== 'true') process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
 // ---------- Types ----------
 
@@ -190,6 +194,7 @@ class Runtime {
 			this.terms?.disconnectAll()
 			this.auth?.destroy()
 			destroyDispatchers()
+			void shutdownOcr().catch(() => {})
 		}
 		process.once('exit', cleanup)
 		process.once('SIGINT', () => {
@@ -208,6 +213,7 @@ class Runtime {
 		this.terms?.disconnectAll()
 		this.auth?.destroy()
 		destroyDispatchers()
+		await shutdownOcr().catch(() => {})
 	}
 }
 
@@ -279,6 +285,48 @@ export class Vm {
 		await this.start()
 	}
 
+	async waitForScreen(
+		opts: ScreenMatchOptions & WaitForOptions,
+	): Promise<ScreenMatchResult> {
+		const timeoutMs = opts.timeoutMs ?? 30_000
+		const intervalMs = opts.intervalMs ?? 1_000
+		const deadline = Date.now() + timeoutMs
+		const session = await getSession(this.id)
+		let last: ScreenMatchResult = { matched: false }
+		let lastMatchedSeq = 0
+		for (;;) {
+			opts.signal?.throwIfAborted()
+			if (session.screen) {
+				const snap = session.screen.snapshot()
+				// Match only paint-bearing frames we haven't already evaluated.
+				if (snap.seq > 0 && snap.seq !== lastMatchedSeq) {
+					lastMatchedSeq = snap.seq
+					last = await matchScreen(snap, opts, opts.signal)
+					if (last.matched) return last
+				}
+			}
+			if (Date.now() >= deadline) {
+				const items = last.items?.length ?? 0
+				const backend = last.backend ?? 'no-frame'
+				const sample = last.text ? ` text: ${JSON.stringify(last.text.replace(/\s+/g, ' ').slice(0, 160))}` : ''
+				throw new Error(
+					`waitForScreen timed out after ${timeoutMs}ms (${items} items via ${backend}).${sample}`,
+				)
+			}
+			// Force a non-incremental refresh, then wait either for the next
+			// paint or the poll interval. ContinuousUpdates handles changing
+			// screens; this kick is the safety net for genuinely quiet servers
+			// (early boot, DPMS off) where nothing would arrive otherwise.
+			const baseline = session.updateSeq
+			session.requestFullUpdate()
+			const remaining = deadline - Date.now()
+			const cap = Math.min(intervalMs, remaining)
+			if (cap > 0) {
+				await session.waitForUpdate(cap, baseline).catch(() => sleep(cap))
+			}
+		}
+	}
+
 	async waitFor(state: VmRunState, opts: WaitForOptions = {}): Promise<void> {
 		const timeoutMs = opts.timeoutMs ?? 60_000
 		const intervalMs = opts.intervalMs ?? 1_000
@@ -336,7 +384,11 @@ export class Vm {
 	async screenshot(path: string, quality?: number): Promise<void>
 	async screenshot(path?: string, quality = 85): Promise<Buffer | void> {
 		const session = await getSession(this.id)
-		await session.waitForUpdate(3_000)
+		const since = session.requestFullUpdate()
+		// `since` is 0 before the first paint ever; in that case wait longer
+		// (Windows during BIOS/early boot can take >10s).
+		const timeout = since === 0 ? 15_000 : 3_000
+		await session.waitForUpdate(timeout, since).catch(() => {})
 		if (!session.screen) throw new Error('framebuffer not ready')
 		const shot = await captureScreenshot(session.screen, quality)
 		const buf = Buffer.from(shot.data, 'base64')
@@ -660,14 +712,16 @@ export async function all<T>(tasks: Iterable<Promise<T>>): Promise<T[]> {
 	return Promise.all(tasks)
 }
 
+export type RaceTask<T> = Promise<T> | ((signal: AbortSignal) => Promise<T>)
+
 export async function race<T>(
-	tasks: Iterable<Promise<T>>,
+	tasks: Iterable<RaceTask<T>>,
 	controller?: AbortController,
 ): Promise<T> {
 	const ctrl = controller ?? new AbortController()
-	const arr = Array.from(tasks)
+	const promises = Array.from(tasks, (t) => (typeof t === 'function' ? t(ctrl.signal) : t))
 	try {
-		return await Promise.race(arr)
+		return await Promise.race(promises)
 	} finally {
 		ctrl.abort()
 	}

@@ -1,0 +1,238 @@
+/**
+ * Screen matching primitives: color presence + OCR text against the raw framebuffer.
+ *
+ * Framebuffer pixel layout is BGRX (see screenshot.ts). Color checks operate on the
+ * raw buffer to avoid re-decoding. OCR encodes a (cropped) region to JPEG and pipes
+ * it to the active OCR backend (rapidocr or tesseract).
+ */
+
+import { encode as encodeJpeg } from 'jpeg-js'
+
+import type { Framebuffer, FramebufferSnapshot } from './framebuffer.js'
+import { getOcrBackend, ocrImage, type OcrItem, type OcrOptions, type OcrResult } from './ocr.js'
+
+type FbLike = Framebuffer | FramebufferSnapshot
+
+function isLiveFramebuffer(fb: FbLike): fb is Framebuffer {
+	// Framebuffer has updateSeq; FramebufferSnapshot exposes seq instead.
+	return 'updateSeq' in fb
+}
+
+export interface Region {
+	x: number
+	y: number
+	w: number
+	h: number
+}
+
+export interface ColorMatch {
+	/** Target color as '#rrggbb' or [r,g,b]. */
+	near: string | [number, number, number]
+	/**
+	 * Similarity threshold 0..1 (1 = exact match, 0 = anything). Default 0.9.
+	 * Internally: 1 - rgbDistance/maxDistance.
+	 */
+	threshold?: number
+	/** Min fraction of region pixels that must match (0..1). Default 0.01 (≥1%). */
+	area?: number
+	/** Restrict color search to this region. */
+	region?: Region
+}
+
+export interface TextMatch {
+	pattern: string | RegExp
+	/**
+	 * Optional region hint. With rapidocr you usually don't need one — every
+	 * detected text block on the full screen is checked individually. With
+	 * tesseract a region (often + scale ≥ 2) is recommended for small UI text.
+	 */
+	region?: Region
+	/**
+	 * Integer nearest-neighbor upscale applied before OCR. Defaults: rapidocr=1,
+	 * tesseract=2. Only useful for tesseract on small UI text.
+	 */
+	scale?: number
+	/** Backend-specific tuning (see OcrOptions). */
+	ocr?: OcrOptions
+}
+
+export interface ScreenMatchOptions {
+	text?: TextMatch | string | RegExp
+	color?: ColorMatch
+	/** Combine text+color: require both ('all', default) or either ('any'). */
+	match?: 'all' | 'any'
+}
+
+export interface ScreenMatchResult {
+	matched: boolean
+	/** Concatenated OCR text (if a text check ran). */
+	text?: string
+	/** Detected text blocks (when the OCR backend provides them). */
+	items?: OcrItem[]
+	/** The specific text block that satisfied the pattern, if any. */
+	matchedItem?: OcrItem
+	colorRatio?: number
+	backend?: OcrResult['backend']
+}
+
+function parseColor(c: string | [number, number, number]): [number, number, number] {
+	if (Array.isArray(c)) return c
+	const m = /^#?([0-9a-f]{6})$/i.exec(c.trim())
+	if (!m) throw new Error(`invalid color: ${c}`)
+	const n = parseInt(m[1], 16)
+	return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
+}
+
+function normalizeText(t: TextMatch | string | RegExp): TextMatch {
+	if (typeof t === 'string' || t instanceof RegExp) return { pattern: t }
+	return t
+}
+
+function clampRegion(fb: FbLike, r?: Region): Region {
+	if (!r) return { x: 0, y: 0, w: fb.width, h: fb.height }
+	const x = Math.max(0, Math.min(fb.width - 1, r.x | 0))
+	const y = Math.max(0, Math.min(fb.height - 1, r.y | 0))
+	const w = Math.max(1, Math.min(fb.width - x, r.w | 0))
+	const h = Math.max(1, Math.min(fb.height - y, r.h | 0))
+	return { x, y, w, h }
+}
+
+/** Returns fraction of region pixels within similarity threshold of target color. */
+export function colorRatio(fb: FbLike, opts: ColorMatch): number {
+	if (fb.width === 0 || fb.height === 0) return 0
+	const [tr, tg, tb] = parseColor(opts.near)
+	const threshold = opts.threshold ?? 0.9
+	// Per-channel tolerance: threshold=1 → exact match, threshold=0 → any colour.
+	// At 0.9, each R/G/B channel may drift up to ~25 units. Chebyshev distance,
+	// which is more intuitive than Euclidean for "how close is this to my color".
+	const tol = Math.round((1 - threshold) * 255)
+	const region = clampRegion(fb, opts.region)
+	const buf = fb.buffer
+	const stride = fb.width * 4
+	const total = region.w * region.h
+	if (total === 0) return 0
+	let hits = 0
+	for (let row = 0; row < region.h; row++) {
+		let off = (region.y + row) * stride + region.x * 4
+		for (let col = 0; col < region.w; col++) {
+			const b = buf[off]
+			const g = buf[off + 1]
+			const r = buf[off + 2]
+			if (
+				Math.abs(r - tr) <= tol &&
+				Math.abs(g - tg) <= tol &&
+				Math.abs(b - tb) <= tol
+			) {
+				hits++
+			}
+			off += 4
+		}
+	}
+	return hits / total
+}
+
+/**
+ * Encode a region of the BGRX framebuffer to a JPEG buffer (RGBA expected by jpeg-js),
+ * with an optional integer nearest-neighbor upscale.
+ */
+export function regionToJpeg(fb: FbLike, r: Region, quality = 85, scale = 1): Buffer {
+	const region = clampRegion(fb, r)
+	const s = Math.max(1, Math.floor(scale))
+	const outW = region.w * s
+	const outH = region.h * s
+	const out = Buffer.alloc(outW * outH * 4)
+	const srcStride = fb.width * 4
+	const dstStride = outW * 4
+	const src = fb.buffer
+	for (let row = 0; row < region.h; row++) {
+		let srcOff = (region.y + row) * srcStride + region.x * 4
+		const dstRowBase = row * s * dstStride
+		for (let col = 0; col < region.w; col++) {
+			const b = src[srcOff]
+			const g = src[srcOff + 1]
+			const r2 = src[srcOff + 2]
+			for (let dy = 0; dy < s; dy++) {
+				let dstOff = dstRowBase + dy * dstStride + col * s * 4
+				for (let dx = 0; dx < s; dx++) {
+					out[dstOff] = r2
+					out[dstOff + 1] = g
+					out[dstOff + 2] = b
+					out[dstOff + 3] = 255
+					dstOff += 4
+				}
+			}
+			srcOff += 4
+		}
+	}
+	return encodeJpeg({ data: out, width: outW, height: outH }, quality).data
+}
+
+function testPattern(pattern: string | RegExp, text: string): boolean {
+	if (typeof pattern === 'string') return text.includes(pattern)
+	// Reset lastIndex so /g and /y flags don't desync across calls.
+	pattern.lastIndex = 0
+	return pattern.test(text)
+}
+
+/** Run text/color checks against a framebuffer snapshot. */
+export async function matchScreen(
+	fb: FbLike,
+	opts: ScreenMatchOptions,
+	signal?: AbortSignal,
+): Promise<ScreenMatchResult> {
+	const combine = opts.match ?? 'all'
+	const checks: boolean[] = []
+	const result: ScreenMatchResult = { matched: false }
+
+	// Snapshot the live framebuffer if the caller passed one — incoming VNC
+	// updates mutate fb.buffer in place and awaits would tear the frame.
+	// Callers that pass a FramebufferSnapshot skip the copy.
+	const snap: FramebufferSnapshot = isLiveFramebuffer(fb)
+		? fb.snapshot()
+		: fb
+
+	if (opts.color) {
+		const ratio = colorRatio(snap, opts.color)
+		const need = opts.color.area ?? 0.01
+		result.colorRatio = ratio
+		const ok = ratio >= need
+		checks.push(ok)
+		if (combine === 'all' && !ok) return result
+		if (combine === 'any' && ok) {
+			result.matched = true
+			return result
+		}
+	}
+
+	if (opts.text !== undefined) {
+		signal?.throwIfAborted()
+		const tm = normalizeText(opts.text)
+		const region = clampRegion(snap, tm.region)
+		const backend = await getOcrBackend()
+		const scale = tm.scale ?? (backend === 'tesseract' ? 2 : 1)
+		const jpeg = regionToJpeg(snap, region, 85, scale)
+		const ocr = await ocrImage(jpeg, tm.ocr, signal)
+		result.text = ocr.text
+		result.items = ocr.items
+		result.backend = ocr.backend
+
+		let ok = false
+		if (ocr.items && ocr.items.length > 0) {
+			for (const it of ocr.items) {
+				if (testPattern(tm.pattern, it.text)) {
+					ok = true
+					result.matchedItem = it
+					break
+				}
+			}
+			if (!ok) ok = testPattern(tm.pattern, ocr.text)
+		} else {
+			ok = testPattern(tm.pattern, ocr.text)
+		}
+		checks.push(ok)
+	}
+
+	if (checks.length === 0) return result
+	result.matched = combine === 'all' ? checks.every(Boolean) : checks.some(Boolean)
+	return result
+}
