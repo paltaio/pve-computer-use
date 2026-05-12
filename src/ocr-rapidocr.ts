@@ -163,7 +163,9 @@ class RapidOcrClient {
 		} catch {}
 		await new Promise<void>((resolve) => {
 			const t = setTimeout(() => {
-				try { proc.kill('SIGTERM') } catch {}
+				try {
+					proc.kill('SIGTERM')
+				} catch {}
 				resolve()
 			}, 2000)
 			proc.once('exit', () => {

@@ -882,7 +882,9 @@ export class VncSessionManager {
 				})
 				return session
 			} catch (err) {
-				try { session.disconnect() } catch {}
+				try {
+					session.disconnect()
+				} catch {}
 				throw err
 			}
 		})()

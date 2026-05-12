@@ -111,11 +111,7 @@ export function colorRatio(fb: FbLike, opts: ColorMatch): number {
 			const b = buf[off]
 			const g = buf[off + 1]
 			const r = buf[off + 2]
-			if (
-				Math.abs(r - tr) <= tol &&
-				Math.abs(g - tg) <= tol &&
-				Math.abs(b - tb) <= tol
-			) {
+			if (Math.abs(r - tr) <= tol && Math.abs(g - tg) <= tol && Math.abs(b - tb) <= tol) {
 				hits++
 			}
 			off += 4
@@ -180,9 +176,7 @@ export async function matchScreen(
 	// Snapshot the live framebuffer if the caller passed one — incoming VNC
 	// updates mutate fb.buffer in place and awaits would tear the frame.
 	// Callers that pass a FramebufferSnapshot skip the copy.
-	const snap: FramebufferSnapshot = isLiveFramebuffer(fb)
-		? fb.snapshot()
-		: fb
+	const snap: FramebufferSnapshot = isLiveFramebuffer(fb) ? fb.snapshot() : fb
 
 	if (opts.color) {
 		const ratio = colorRatio(snap, opts.color)

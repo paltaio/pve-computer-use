@@ -5,11 +5,7 @@
  * Returns structured boxes per detected text block.
  */
 
-import {
-	getRapidOcrClient,
-	shutdownRapidOcr,
-	type OcrItem,
-} from './ocr-rapidocr.js'
+import { getRapidOcrClient, shutdownRapidOcr, type OcrItem } from './ocr-rapidocr.js'
 
 export interface OcrResult {
 	/** Concatenated text: `items.map(i => i.text).join('\n')`. */
@@ -25,10 +21,7 @@ export type { OcrItem }
 /**
  * Run OCR on an encoded image buffer (PNG/JPEG/etc).
  */
-export async function ocrImage(
-	image: Buffer,
-	signal?: AbortSignal,
-): Promise<OcrResult> {
+export async function ocrImage(image: Buffer, signal?: AbortSignal): Promise<OcrResult> {
 	signal?.throwIfAborted()
 	const client = getRapidOcrClient()
 	const res = await client.recognize(image, signal)
