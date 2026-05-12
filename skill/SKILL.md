@@ -148,6 +148,7 @@ vm.waitFor('running' | 'stopped' | ..., { timeoutMs, intervalMs, signal })
 vm.screenshot()                         // -> Buffer (JPEG)
 vm.screenshot('out.jpg', quality?)      // saves, returns void
 vm.waitForScreenChange(timeoutMs?)
+vm.waitForScreen({ text?, color?, match?, timeoutMs?, intervalMs?, signal? })
 vm.disconnectVnc()
 
 vm.guest.exec(cmd, args?, { timeoutMs? })   // -> { exitcode, stdout, stderr }
@@ -194,6 +195,89 @@ table.
   clipboard isn't available.
 - **`vm.guest.exec`** — when guest-agent is up and you don't need to script the
   UI; this is the fastest, most reliable path.
+
+## Screen matching (OCR + color)
+
+`vm.waitForScreen` polls the framebuffer until a text pattern, a color
+condition, or both, are satisfied — useful for waiting on dialogs, banners,
+login screens, installer steps, anything without a programmatic signal.
+
+```ts
+// regex over any text block found on the whole screen
+await vm.waitForScreen({ text: /Welcome \w+/, timeoutMs: 30_000 })
+
+// substring is also fine
+await vm.waitForScreen({ text: 'Press any key' })
+
+// color: ≥50% of a region within 80% similarity of pure red
+await vm.waitForScreen({
+  color: { near: '#ff0000', threshold: 0.8, area: 0.5,
+           region: { x: 0, y: 0, w: 200, h: 100 } },
+})
+
+// combine: text OR color
+await vm.waitForScreen({
+  text: /Login/i,
+  color: { near: '#22aa55', area: 0.05 },
+  match: 'any',
+})
+```
+
+The result includes `matched`, the concatenated OCR `text`, the structured
+`items` (each `{ box, text, conf }`), and `matchedItem` — the specific block
+that satisfied the pattern. Use `matchedItem.box` to click whatever you just
+found:
+
+```ts
+const r = await vm.waitForScreen({ text: 'OK' })
+const [[x1, y1], , [x2, y2]] = r.matchedItem!.box
+await vm.kvm.click(Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2))
+```
+
+OCR backends, picked automatically:
+
+- **rapidocr** (PP-OCRv4 mobile via OpenVINO/ONNX) — preferred. Reads small UI
+  text reliably without region hints; ~1–2 s per 1280×800 frame warm,
+  ~8 s first-call worker boot (model load), ~700 MB RSS. Needs `uv` on PATH;
+  the worker auto-installs `rapidocr` + `openvino` into a uv-managed env on
+  first use.
+- **tesseract** — fallback. Fast (~200 ms) and tiny but struggles with small
+  text and busy backgrounds. For tesseract, prefer giving `text: { pattern,
+  region, scale: 3, ocr: { psm: 6 } }` so OCR runs on a cropped, upscaled
+  patch.
+
+Force a backend with `PVE_OCR=rapidocr` or `PVE_OCR=tesseract`. Set
+`PVE_OCR_DEBUG=1` to surface worker stderr.
+
+### Example: detect a Windows 10/11 login screen after reboot
+
+`match: 'any'` is the right pattern when several signals could appear: text or
+color, lock screen or login prompt, English or localized — any single hit
+returns. Color check runs first and short-circuits OCR.
+
+```ts
+await vm.guest.exec('shutdown', ['/r', '/t', '0', '/f'])  // reboot
+await vm.waitFor('running')
+
+const r = await vm.waitForScreen({
+  // Lock screen (clock/date) OR login prompt (username, Password placeholder).
+  text: /iot|Password|Sign in|Other user|\d{1,2}:\d{2}/i,
+  // Lock/login background is dark Windows blue.
+  color: { near: '#0a4e8c', threshold: 0.5, area: 0.4 },
+  match: 'any',
+  timeoutMs: 120_000,
+  intervalMs: 2_500,
+})
+
+if (r.matchedItem) {
+  // text fired — center the cursor on the matched block and click through.
+  const [[x1, y1], , [x2, y2]] = r.matchedItem.box
+  await vm.kvm.click((x1 + x2) >> 1, (y1 + y2) >> 1)
+} else {
+  // color fired (lock screen showing) — press a key to advance to login.
+  await vm.kvm.press('space')
+}
+```
 
 ## Pitfalls
 
