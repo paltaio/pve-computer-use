@@ -18,15 +18,20 @@ import { Framebuffer } from './framebuffer.js'
 import {
 	RFB_ENCODING_RAW,
 	RFB_ENCODING_COPYRECT,
+	RFB_ENCODING_CURSOR,
 	RFB_ENCODING_DESKTOP_SIZE,
 	RFB_ENCODING_EXTENDED_KEY,
+	RFB_ENCODING_LAST_RECT,
+	RFB_ENCODING_CONTINUOUS_UPDATES,
 	MSG_FB_UPDATE,
 	MSG_SET_COLOUR_MAP,
 	MSG_BELL,
 	MSG_SERVER_CUT_TEXT,
+	MSG_END_OF_CONTINUOUS_UPDATES,
 	buildSetPixelFormat,
 	buildSetEncodings,
 	buildFbUpdateRequest,
+	buildEnableContinuousUpdates,
 	buildKeyEvent,
 	buildPointerEvent,
 	buildExtendedKeyEvent,
@@ -173,6 +178,7 @@ export class VncSession extends EventEmitter {
 	private state: HandshakeState = 'awaiting_version'
 	private _connected = false
 	private supportsExtendedKey = false
+	private continuousUpdatesEnabled = false
 	private vncPassword: string = ''
 
 	constructor(api: PveApiClient, options: VncSessionOptions) {
@@ -429,22 +435,31 @@ export class VncSession extends EventEmitter {
 		// Initialize framebuffer
 		this.framebuffer = new Framebuffer(width, height)
 
-		// Configure our pixel format and encodings
+		// Configure our pixel format and encodings. ContinuousUpdates lets the
+		// server push deltas without per-frame requests; Cursor + LastRect are
+		// helper pseudo-encodings the server uses with it.
 		this.send(buildSetPixelFormat())
 		this.send(
 			buildSetEncodings([
 				RFB_ENCODING_COPYRECT,
 				RFB_ENCODING_RAW,
 				RFB_ENCODING_DESKTOP_SIZE,
+				RFB_ENCODING_CURSOR,
+				RFB_ENCODING_LAST_RECT,
+				RFB_ENCODING_CONTINUOUS_UPDATES,
 				RFB_ENCODING_EXTENDED_KEY,
 			]),
 		)
 
-		// Request full framebuffer update
+		// ContinuousUpdates is advertised in SetEncodings; the server confirms
+		// support via a pseudo-encoding rect — only then is EnableContinuousUpdates
+		// safe to send. We let the per-update incremental loop carry idle servers.
 		this.send(buildFbUpdateRequest(false, 0, 0, width, height))
 
 		this._connected = true
 		this.state = 'connected'
+		// connect() resolves after handshake — callers that need real pixels
+		// should `await session.waitForUpdate(N, 0)` (seq===0 means no paint yet).
 		this.emit('_init_done', width, height)
 		return true
 	}
@@ -467,6 +482,11 @@ export class VncSession extends EventEmitter {
 				return true
 			case MSG_SERVER_CUT_TEXT:
 				return this.handleServerCutText()
+			case MSG_END_OF_CONTINUOUS_UPDATES:
+				// Sent only when continuous updates are disabled by us (we never do).
+				// Consume the 1-byte header and move on.
+				this.recvBuffer = this.recvBuffer.subarray(1)
+				return true
 			default:
 				this.emit('error', new Error(`Unknown server message type: ${msgType}`))
 				return false
@@ -480,9 +500,13 @@ export class VncSession extends EventEmitter {
 	 */
 	private handleFramebufferUpdate(): boolean {
 		if (this.recvBuffer.length < 4) return false
+		// FB messages can only arrive after handshake, which allocates framebuffer.
+		const fb = this.framebuffer
+		if (!fb) return false
 
 		const rectCount = this.recvBuffer.readUInt16BE(2)
 		let offset = 4
+		let pixelsApplied = false
 
 		for (let i = 0; i < rectCount; i++) {
 			if (this.recvBuffer.length < offset + 12) return false
@@ -496,10 +520,11 @@ export class VncSession extends EventEmitter {
 
 			switch (encoding) {
 				case RFB_ENCODING_RAW: {
-					const dataLen = w * h * 4 // 4 bytes per pixel
+					const dataLen = w * h * 4
 					if (this.recvBuffer.length < offset + dataLen) return false
-					this.framebuffer?.applyRaw(x, y, w, h, this.recvBuffer.subarray(offset, offset + dataLen))
+					fb.applyRaw(x, y, w, h, this.recvBuffer.subarray(offset, offset + dataLen))
 					offset += dataLen
+					pixelsApplied = true
 					break
 				}
 
@@ -507,21 +532,47 @@ export class VncSession extends EventEmitter {
 					if (this.recvBuffer.length < offset + 4) return false
 					const srcX = this.recvBuffer.readUInt16BE(offset)
 					const srcY = this.recvBuffer.readUInt16BE(offset + 2)
-					this.framebuffer?.applyCopyRect(x, y, w, h, srcX, srcY)
+					fb.applyCopyRect(x, y, w, h, srcX, srcY)
 					offset += 4
+					pixelsApplied = true
 					break
 				}
 
 				case RFB_ENCODING_DESKTOP_SIZE: {
-					// DesktopSize: the rectangle dimensions ARE the new size
-					this.framebuffer?.resize(w, h)
+					fb.resize(w, h)
 					this.emit('resize', w, h)
+					if (this.continuousUpdatesEnabled) {
+						this.send(buildEnableContinuousUpdates(true, 0, 0, w, h))
+					}
+					pixelsApplied = true
+					break
+				}
+
+				case RFB_ENCODING_CURSOR: {
+					// Cursor pixels + mask; we don't render the cursor into the FB.
+					const pixelsLen = w * h * 4
+					const maskLen = Math.floor((w + 7) / 8) * h
+					if (this.recvBuffer.length < offset + pixelsLen + maskLen) return false
+					offset += pixelsLen + maskLen
+					break
+				}
+
+				case RFB_ENCODING_LAST_RECT: {
+					// Terminator pseudo-encoding.
+					i = rectCount
 					break
 				}
 
 				case RFB_ENCODING_EXTENDED_KEY: {
-					// Pseudo-encoding: server confirms Extended Key Event support
 					this.supportsExtendedKey = true
+					break
+				}
+
+				case RFB_ENCODING_CONTINUOUS_UPDATES: {
+					if (!this.continuousUpdatesEnabled) {
+						this.continuousUpdatesEnabled = true
+						this.send(buildEnableContinuousUpdates(true, 0, 0, fb.width, fb.height))
+					}
 					break
 				}
 
@@ -533,12 +584,11 @@ export class VncSession extends EventEmitter {
 
 		this.recvBuffer = this.recvBuffer.subarray(offset)
 
-		// Request next incremental update
-		if (this.framebuffer) {
-			this.send(buildFbUpdateRequest(true, 0, 0, this.framebuffer.width, this.framebuffer.height))
-		}
+		// Fallback per-update incremental request — cheap, lets servers without
+		// ContinuousUpdates still push deltas.
+		this.send(buildFbUpdateRequest(true, 0, 0, fb.width, fb.height))
 
-		this.emit('update')
+		if (pixelsApplied) this.emit('update', fb.updateSeq)
 		return true
 	}
 
@@ -734,33 +784,56 @@ export class VncSession extends EventEmitter {
 	/**
 	 * Request a fresh full framebuffer update.
 	 */
-	requestFullUpdate(): void {
-		if (this.framebuffer) {
-			this.send(buildFbUpdateRequest(false, 0, 0, this.framebuffer.width, this.framebuffer.height))
-		}
+	/** Send a non-incremental FB request. Returns the seq at the time of the send. */
+	requestFullUpdate(): number {
+		if (!this.framebuffer) return 0
+		this.send(buildFbUpdateRequest(false, 0, 0, this.framebuffer.width, this.framebuffer.height))
+		return this.framebuffer.updateSeq
+	}
+
+	/** Current monotonic paint counter (0 before first frame). */
+	get updateSeq(): number {
+		return this.framebuffer?.updateSeq ?? 0
 	}
 
 	/**
-	 * Wait for at least one framebuffer update to arrive, or timeout.
+	 * Resolve when the framebuffer seq advances past `since` (default: current
+	 * seq). Rejects on timeout OR when the session closes/errors, so callers
+	 * never sit on a dead socket waiting for paint that will never come.
 	 */
-	waitForUpdate(timeoutMs: number = 3000): Promise<void> {
-		return new Promise<void>((resolve) => {
-			if (this.framebuffer?.dirty) {
-				resolve()
+	waitForUpdate(timeoutMs: number = 3000, since?: number): Promise<number> {
+		const fb = this.framebuffer
+		if (!fb) return Promise.reject(new Error('framebuffer not initialised'))
+		const baseline = since ?? fb.updateSeq
+		return new Promise<number>((resolve, reject) => {
+			if (fb.updateSeq > baseline) {
+				resolve(fb.updateSeq)
 				return
 			}
-
-			const timer = setTimeout(() => {
+			const cleanup = () => {
+				clearTimeout(timer)
 				this.removeListener('update', onUpdate)
-				resolve()
+				this.removeListener('close', onClose)
+				this.removeListener('error', onClose)
+			}
+			const onUpdate = (seq: number) => {
+				if (seq > baseline) {
+					cleanup()
+					resolve(seq)
+				}
+			}
+			const onClose = (err?: Error) => {
+				cleanup()
+				reject(err ?? new Error('VNC session closed'))
+			}
+			const timer = setTimeout(() => {
+				cleanup()
+				reject(new Error(`waitForUpdate timed out after ${timeoutMs}ms (seq=${fb.updateSeq})`))
 			}, timeoutMs)
 			timer.unref()
-
-			const onUpdate = () => {
-				clearTimeout(timer)
-				resolve()
-			}
-			this.once('update', onUpdate)
+			this.on('update', onUpdate)
+			this.once('close', onClose)
+			this.once('error', onClose)
 		})
 	}
 
@@ -781,6 +854,7 @@ export class VncSession extends EventEmitter {
  */
 export class VncSessionManager {
 	private sessions = new Map<number, VncSession>()
+	private pending = new Map<number, Promise<VncSession>>()
 	private api: PveApiClient
 
 	constructor(api: PveApiClient) {
@@ -788,23 +862,36 @@ export class VncSessionManager {
 	}
 
 	async connect(vmid: number, node?: string): Promise<VncSession> {
-		// Disconnect existing session for this VM
 		const existing = this.sessions.get(vmid)
-		if (existing?.connected) {
-			return existing
+		if (existing?.connected) return existing
+		// Coalesce concurrent first-callers onto the same handshake.
+		const inflight = this.pending.get(vmid)
+		if (inflight) return inflight
+		if (existing) existing.disconnect()
+
+		const p = (async () => {
+			const resolvedNode = node ?? (await this.api.findVmNode(vmid))
+			const session = new VncSession(this.api, { node: resolvedNode, vmid })
+			try {
+				await session.connect()
+				this.sessions.set(vmid, session)
+				// Drop the session from the map when the underlying WS dies, so
+				// getSession() never hands out a half-dead reference.
+				session.once('close', () => {
+					if (this.sessions.get(vmid) === session) this.sessions.delete(vmid)
+				})
+				return session
+			} catch (err) {
+				try { session.disconnect() } catch {}
+				throw err
+			}
+		})()
+		this.pending.set(vmid, p)
+		try {
+			return await p
+		} finally {
+			this.pending.delete(vmid)
 		}
-		if (existing) {
-			existing.disconnect()
-		}
-
-		// Resolve node if not provided
-		const resolvedNode = node ?? (await this.api.findVmNode(vmid))
-
-		const session = new VncSession(this.api, { node: resolvedNode, vmid })
-		this.sessions.set(vmid, session)
-
-		await session.connect()
-		return session
 	}
 
 	getSession(vmid: number): VncSession | undefined {

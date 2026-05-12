@@ -12,8 +12,11 @@
 
 export const RFB_ENCODING_RAW = 0
 export const RFB_ENCODING_COPYRECT = 1
+export const RFB_ENCODING_CURSOR = -239
 export const RFB_ENCODING_DESKTOP_SIZE = -223
+export const RFB_ENCODING_LAST_RECT = -224
 export const RFB_ENCODING_EXTENDED_KEY = -258
+export const RFB_ENCODING_CONTINUOUS_UPDATES = -313
 
 // --- Client→Server message types ---
 
@@ -22,6 +25,7 @@ export const MSG_SET_ENCODINGS = 2
 export const MSG_FB_UPDATE_REQUEST = 3
 export const MSG_KEY_EVENT = 4
 export const MSG_POINTER_EVENT = 5
+export const MSG_ENABLE_CONTINUOUS_UPDATES = 150
 export const MSG_EXTENDED_KEY_EVENT = 255
 
 // --- Server→Client message types ---
@@ -30,6 +34,7 @@ export const MSG_FB_UPDATE = 0
 export const MSG_SET_COLOUR_MAP = 1
 export const MSG_BELL = 2
 export const MSG_SERVER_CUT_TEXT = 3
+export const MSG_END_OF_CONTINUOUS_UPDATES = 150
 
 // --- Pixel format: 32-bit RGBA, little-endian ---
 
@@ -118,6 +123,27 @@ export function buildPointerEvent(buttonMask: number, x: number, y: number): Buf
 	buf.writeUInt8(buttonMask, 1)
 	buf.writeUInt16BE(x, 2)
 	buf.writeUInt16BE(y, 4)
+	return buf
+}
+
+/**
+ * Build EnableContinuousUpdates client message (type 150, 10 bytes).
+ * Asks the server to push framebuffer changes without per-update requests.
+ */
+export function buildEnableContinuousUpdates(
+	enable: boolean,
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+): Buffer {
+	const buf = Buffer.alloc(10)
+	buf.writeUInt8(MSG_ENABLE_CONTINUOUS_UPDATES, 0)
+	buf.writeUInt8(enable ? 1 : 0, 1)
+	buf.writeUInt16BE(x, 2)
+	buf.writeUInt16BE(y, 4)
+	buf.writeUInt16BE(w, 6)
+	buf.writeUInt16BE(h, 8)
 	return buf
 }
 
