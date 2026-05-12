@@ -51,13 +51,13 @@ exit, so an interrupted script never leaves stuck modifiers.
 Prefer inline `bun -e` for one-shots; don't litter `/tmp` for three lines:
 
 ```sh
-bun -e 'import pve from "<absolute-path-to-repo>/skill/index.ts"; const v = pve.use(100); console.log(await v.status()); await pve.disconnect()'
+NODE_TLS_REJECT_UNAUTHORIZED=0 bun -e 'import pve from "<absolute-path-to-repo>/skill/index.ts"; const v = pve.use(100); console.log(await v.status()); await pve.disconnect()'
 ```
 
 Multi-line one-shots: heredoc into `bun -`:
 
 ```sh
-bun - <<'EOF'
+NODE_TLS_REJECT_UNAUTHORIZED=0 bun - <<'EOF'
 import pve from '<absolute-path-to-repo>/skill/index.ts'
 const vm = pve.use(100)
 await vm.kvm.press('ctrl+alt+t')
