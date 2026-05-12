@@ -17,12 +17,20 @@ import { PveApiClient } from '../src/pve-api.js'
 import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../src/vnc-session.js'
 import { TerminalSessionManager } from '../src/terminal-session.js'
 import { captureScreenshot } from '../src/screenshot.js'
-import { matchScreen, type ScreenMatchOptions, type ScreenMatchResult } from '../src/screen-match.js'
+import {
+	matchScreen,
+	regionToJpeg,
+	type Region,
+	type ScreenMatchOptions,
+	type ScreenMatchResult,
+} from '../src/screen-match.js'
 import { isWindowsGuest, typeTextWindowsClipboard } from '../src/windows-guest.js'
 import { parseKeyCombo } from '../src/rfb.js'
 import { mouseButtonToBit, sleep } from '../src/helpers.js'
 import { destroyDispatchers } from '../src/http.js'
-import { shutdownOcr } from '../src/ocr.js'
+import { ocrImage, shutdownOcr, type OcrItem } from '../src/ocr.js'
+
+export type { Region, OcrItem }
 
 if (process.env.PVE_VERIFY_SSL !== 'true') process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
@@ -71,6 +79,28 @@ export interface WaitForOptions {
 	timeoutMs?: number
 	intervalMs?: number
 	signal?: AbortSignal
+}
+
+export interface ReadScreenOptions {
+	/** Restrict OCR to this region (source-image pixels). Default: full screen. */
+	region?: Region
+	/** Integer nearest-neighbor upscale before OCR. Default 1. */
+	scale?: number
+	/** Force a fresh VNC update before reading. Default: true. */
+	refresh?: boolean
+	signal?: AbortSignal
+}
+
+export interface ReadScreenResult {
+	/** Concatenated text from all detected blocks. */
+	text: string
+	/** Detected text blocks with quadrilateral boxes in source-image pixels. */
+	items: OcrItem[]
+	/** Inference time inside the OCR worker (ms). */
+	ms: number
+	/** Framebuffer dimensions at the time of capture. */
+	width: number
+	height: number
 }
 
 // ---------- Action descriptors (data, runnable by run/timeline) ----------
@@ -324,6 +354,47 @@ export class Vm {
 			if (cap > 0) {
 				await session.waitForUpdate(cap, baseline).catch(() => sleep(cap))
 			}
+		}
+	}
+
+	/**
+	 * OCR the current screen (or a region) once and return detected text blocks
+	 * with their bounding boxes. Use this when an agent needs to locate text
+	 * to click, rather than polling for a known string with `waitForScreen`.
+	 *
+	 * Each item's `box` is a quadrilateral [[x,y],[x,y],[x,y],[x,y]] in
+	 * source-image pixels — compute its centroid to feed `kvm.click(x, y)`.
+	 */
+	async readScreen(opts: ReadScreenOptions = {}): Promise<ReadScreenResult> {
+		const session = await getSession(this.id)
+		if (opts.refresh !== false) {
+			const since = session.requestFullUpdate()
+			const timeout = since === 0 ? 15_000 : 3_000
+			await session.waitForUpdate(timeout, since).catch(() => {})
+		}
+		opts.signal?.throwIfAborted()
+		if (!session.screen) throw new Error('framebuffer not ready')
+		const snap = session.screen.snapshot()
+		const scale = opts.scale ?? 1
+		const region: Region = opts.region ?? { x: 0, y: 0, w: snap.width, h: snap.height }
+		const jpeg = regionToJpeg(snap, region, 85, scale)
+		const ocr = await ocrImage(jpeg, opts.signal)
+		// If the caller passed a region or scale, item coordinates are in the
+		// cropped/upscaled space. Map them back to source-image pixels so
+		// agents can click without doing the math.
+		const items = ocr.items.map((it) => ({
+			...it,
+			box: it.box.map(([x, y]) => [
+				region.x + x / scale,
+				region.y + y / scale,
+			]) as [number, number][],
+		}))
+		return {
+			text: ocr.text,
+			items,
+			ms: ocr.ms,
+			width: snap.width,
+			height: snap.height,
 		}
 	}
 

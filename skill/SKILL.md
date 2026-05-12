@@ -149,6 +149,7 @@ vm.screenshot()                         // -> Buffer (JPEG)
 vm.screenshot('out.jpg', quality?)      // saves, returns void
 vm.waitForScreenChange(timeoutMs?)
 vm.waitForScreen({ text?, color?, match?, timeoutMs?, intervalMs?, signal? })
+vm.readScreen({ region?, scale?, ocr?, refresh?, signal? })  // one-shot OCR
 vm.disconnectVnc()
 
 vm.guest.exec(cmd, args?, { timeoutMs? })   // -> { exitcode, stdout, stderr }
@@ -234,20 +235,11 @@ const [[x1, y1], , [x2, y2]] = r.matchedItem!.box
 await vm.kvm.click(Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2))
 ```
 
-OCR backends, picked automatically:
-
-- **rapidocr** (PP-OCRv4 mobile via OpenVINO/ONNX) — preferred. Reads small UI
-  text reliably without region hints; ~1–2 s per 1280×800 frame warm,
-  ~8 s first-call worker boot (model load), ~700 MB RSS. Needs `uv` on PATH;
-  the worker auto-installs `rapidocr` + `openvino` into a uv-managed env on
-  first use.
-- **tesseract** — fallback. Fast (~200 ms) and tiny but struggles with small
-  text and busy backgrounds. For tesseract, prefer giving `text: { pattern,
-  region, scale: 3, ocr: { psm: 6 } }` so OCR runs on a cropped, upscaled
-  patch.
-
-Force a backend with `PVE_OCR=rapidocr` or `PVE_OCR=tesseract`. Set
-`PVE_OCR_DEBUG=1` to surface worker stderr.
+OCR runs through rapidocr (PP-OCRv4 mobile via OpenVINO/ONNX). It reads small
+UI text reliably without region hints; ~1–2 s per 1280×800 frame warm, ~8 s
+first-call worker boot (model load), ~700 MB RSS. Needs `uv` on PATH; the
+worker auto-installs `rapidocr` + `openvino` into a uv-managed env on first
+use. Set `PVE_OCR_DEBUG=1` to surface worker stderr.
 
 ### Example: detect a Windows 10/11 login screen after reboot
 
@@ -278,6 +270,27 @@ if (r.matchedItem) {
   await vm.kvm.press('space')
 }
 ```
+
+### One-shot reads for agent-driven clicking
+
+`vm.readScreen()` returns every detected text block once, with each block's
+quadrilateral `box` in source-image pixels. Pair it with `vm.kvm.click` when an
+agent needs to locate text rather than wait for a known string.
+
+```ts
+const screen = await vm.readScreen()
+const target = screen.items.find((i) => /Sign in/i.test(i.text))
+if (target) {
+  const [[x1, y1], , [x2, y2]] = target.box
+  await vm.kvm.click((x1 + x2) >> 1, (y1 + y2) >> 1)
+}
+```
+
+`region` crops before OCR (faster and more reliable for dense UI). `scale`
+upscales before OCR (default 1). Item boxes are
+remapped back to source-image pixels, so `click(x, y)` works regardless of
+crop or scale. `refresh: false` skips the framebuffer kick when you've just
+acted and the screen hasn't moved.
 
 ## Pitfalls
 

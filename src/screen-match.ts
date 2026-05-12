@@ -3,13 +3,13 @@
  *
  * Framebuffer pixel layout is BGRX (see screenshot.ts). Color checks operate on the
  * raw buffer to avoid re-decoding. OCR encodes a (cropped) region to JPEG and pipes
- * it to the active OCR backend (rapidocr or tesseract).
+ * it to rapidocr.
  */
 
 import { encode as encodeJpeg } from 'jpeg-js'
 
 import type { Framebuffer, FramebufferSnapshot } from './framebuffer.js'
-import { getOcrBackend, ocrImage, type OcrItem, type OcrOptions, type OcrResult } from './ocr.js'
+import { ocrImage, type OcrItem } from './ocr.js'
 
 type FbLike = Framebuffer | FramebufferSnapshot
 
@@ -42,18 +42,12 @@ export interface ColorMatch {
 export interface TextMatch {
 	pattern: string | RegExp
 	/**
-	 * Optional region hint. With rapidocr you usually don't need one — every
-	 * detected text block on the full screen is checked individually. With
-	 * tesseract a region (often + scale ≥ 2) is recommended for small UI text.
+	 * Optional region hint. rapidocr usually doesn't need one — every detected
+	 * text block on the full screen is checked individually.
 	 */
 	region?: Region
-	/**
-	 * Integer nearest-neighbor upscale applied before OCR. Defaults: rapidocr=1,
-	 * tesseract=2. Only useful for tesseract on small UI text.
-	 */
+	/** Integer nearest-neighbor upscale applied before OCR. Default 1. */
 	scale?: number
-	/** Backend-specific tuning (see OcrOptions). */
-	ocr?: OcrOptions
 }
 
 export interface ScreenMatchOptions {
@@ -67,12 +61,11 @@ export interface ScreenMatchResult {
 	matched: boolean
 	/** Concatenated OCR text (if a text check ran). */
 	text?: string
-	/** Detected text blocks (when the OCR backend provides them). */
+	/** Detected text blocks (if a text check ran). */
 	items?: OcrItem[]
 	/** The specific text block that satisfied the pattern, if any. */
 	matchedItem?: OcrItem
 	colorRatio?: number
-	backend?: OcrResult['backend']
 }
 
 function parseColor(c: string | [number, number, number]): [number, number, number] {
@@ -208,27 +201,21 @@ export async function matchScreen(
 		signal?.throwIfAborted()
 		const tm = normalizeText(opts.text)
 		const region = clampRegion(snap, tm.region)
-		const backend = await getOcrBackend()
-		const scale = tm.scale ?? (backend === 'tesseract' ? 2 : 1)
+		const scale = tm.scale ?? 1
 		const jpeg = regionToJpeg(snap, region, 85, scale)
-		const ocr = await ocrImage(jpeg, tm.ocr, signal)
+		const ocr = await ocrImage(jpeg, signal)
 		result.text = ocr.text
 		result.items = ocr.items
-		result.backend = ocr.backend
 
 		let ok = false
-		if (ocr.items && ocr.items.length > 0) {
-			for (const it of ocr.items) {
-				if (testPattern(tm.pattern, it.text)) {
-					ok = true
-					result.matchedItem = it
-					break
-				}
+		for (const it of ocr.items) {
+			if (testPattern(tm.pattern, it.text)) {
+				ok = true
+				result.matchedItem = it
+				break
 			}
-			if (!ok) ok = testPattern(tm.pattern, ocr.text)
-		} else {
-			ok = testPattern(tm.pattern, ocr.text)
 		}
+		if (!ok) ok = testPattern(tm.pattern, ocr.text)
 		checks.push(ok)
 	}
 
