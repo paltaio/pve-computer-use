@@ -93,6 +93,7 @@ install_for() {
 	local target="$root/skills/$skill_name"
 	local tmp="$target.tmp.$$"
 	local env_path="$target/pve.env"
+	local env_backup=""
 
 	mkdir -p "$root/skills"
 	rm -rf "$tmp"
@@ -113,21 +114,32 @@ install_for() {
 
 	(cd "$tmp" && bun install --frozen-lockfile --production >/dev/null)
 
+	if [[ -f "$env_path" ]]; then
+		env_backup="$(mktemp)"
+		cp "$env_path" "$env_backup"
+	fi
+
 	rm -rf "$target"
 	mv "$tmp" "$target"
 
-	{
-		shell_export PVE_HOST "$pve_host"
-		shell_export PVE_USER "$pve_user"
-		shell_export PVE_PASSWORD "$pve_password"
-		shell_export PVE_VERIFY_SSL "$pve_verify_ssl"
-		if [[ -n "${PVE_PORT:-}" ]]; then
-			shell_export PVE_PORT "$PVE_PORT"
-		fi
-	} > "$env_path"
+	if [[ -n "$env_backup" ]]; then
+		mv "$env_backup" "$env_path"
+	else
+		{
+			shell_export PVE_HOST "$pve_host"
+			shell_export PVE_USER "$pve_user"
+			shell_export PVE_PASSWORD "$pve_password"
+			shell_export PVE_VERIFY_SSL "$pve_verify_ssl"
+			if [[ -n "${PVE_PORT:-}" ]]; then
+				shell_export PVE_PORT "$PVE_PORT"
+			fi
+		} > "$env_path"
+	fi
 	chmod 600 "$env_path"
 
-	echo "installed: $target"
+	echo "  $root"
+	echo "    skill: $target"
+	echo "    env:   $env_path"
 }
 
 pve_host="$(prompt_value PVE_HOST "PVE host")"
@@ -136,6 +148,7 @@ pve_password="$(prompt_value PVE_PASSWORD "PVE password" true)"
 pve_verify_ssl="${PVE_VERIFY_SSL:-false}"
 
 installed=0
+echo "Installed pve-vm skill:"
 for root in "$HOME/.claude" "$HOME/.codex" "$HOME/.opencode"; do
 	if [[ -d "$root" ]]; then
 		install_for "$root"
