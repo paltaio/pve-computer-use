@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_url="${PVE_SKILL_REPO_URL:-https://github.com/paltaio/pve-computer-use.git}"
+repo_ref="${PVE_SKILL_REF:-main}"
+work_dir=""
+repo_dir=""
+skill_name="pve-vm"
+
+if ! command -v bun >/dev/null 2>&1; then
+	echo "bun is required and was not found on PATH" >&2
+	exit 1
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+	echo "git is required and was not found on PATH" >&2
+	exit 1
+fi
+
+cleanup() {
+	if [[ -n "$work_dir" ]]; then
+		rm -rf "$work_dir"
+	fi
+}
+trap cleanup EXIT
+
+if [[ -n "${PVE_SKILL_SOURCE_DIR:-}" ]]; then
+	repo_dir="$(cd "$PVE_SKILL_SOURCE_DIR" && pwd -P)"
+else
+	work_dir="$(mktemp -d)"
+	repo_dir="$work_dir/repo"
+	git clone --quiet --depth 1 --branch "$repo_ref" "$repo_url" "$repo_dir"
+fi
+
+skill_src="$repo_dir/skill"
+src_src="$repo_dir/src"
+ocr_src="$repo_dir/ocr"
+package_src="$repo_dir/package.json"
+lock_src="$repo_dir/bun.lock"
+
+if [[ ! -f "$skill_src/SKILL.md" ]]; then
+	echo "skill/SKILL.md not found" >&2
+	exit 1
+fi
+if [[ ! -d "$src_src" ]]; then
+	echo "src not found" >&2
+	exit 1
+fi
+if [[ ! -d "$ocr_src" ]]; then
+	echo "ocr not found" >&2
+	exit 1
+fi
+if [[ ! -f "$package_src" || ! -f "$lock_src" ]]; then
+	echo "package.json and bun.lock are required" >&2
+	exit 1
+fi
+
+prompt_value() {
+	local name="$1"
+	local prompt="$2"
+	local secret="${3:-false}"
+	local value="${!name:-}"
+
+	if [[ -n "$value" ]]; then
+		printf '%s' "$value"
+		return
+	fi
+	if [[ ! -t 0 ]]; then
+		echo "$name is required" >&2
+		exit 2
+	fi
+	if [[ "$secret" == "true" ]]; then
+		read -r -s -p "$prompt: " value
+		echo >&2
+	else
+		read -r -p "$prompt: " value
+	fi
+	if [[ -z "$value" ]]; then
+		echo "$name is required" >&2
+		exit 2
+	fi
+	printf '%s' "$value"
+}
+
+shell_export() {
+	local key="$1"
+	local value="$2"
+	printf "export %s='%s'\n" "$key" "${value//\'/\'\\\'\'}"
+}
+
+install_for() {
+	local root="$1"
+	local target="$root/skills/$skill_name"
+	local tmp="$target.tmp.$$"
+	local env_path="$target/pve.env"
+
+	mkdir -p "$root/skills"
+	rm -rf "$tmp"
+	cp -R "$skill_src" "$tmp"
+	cp -R "$src_src" "$tmp/src"
+	cp -R "$ocr_src" "$tmp/ocr"
+	cp "$package_src" "$tmp/package.json"
+	cp "$lock_src" "$tmp/bun.lock"
+	find "$tmp/src" -name '*.test.ts' -delete
+
+	while IFS= read -r -d '' file; do
+		TARGET="$target" REPO_DIR="$repo_dir" perl -0pi -e '
+			s#<absolute-path-to-repo>/skill#$ENV{TARGET}#g;
+			s#<absolute-path-to-repo>#$ENV{REPO_DIR}#g;
+			s#\.\./\.\./src/#../src/#g;
+		' "$file"
+	done < <(find "$tmp" -type f -print0)
+
+	(cd "$tmp" && bun install --frozen-lockfile --production >/dev/null)
+
+	rm -rf "$target"
+	mv "$tmp" "$target"
+
+	{
+		shell_export PVE_HOST "$pve_host"
+		shell_export PVE_USER "$pve_user"
+		shell_export PVE_PASSWORD "$pve_password"
+		shell_export PVE_VERIFY_SSL "$pve_verify_ssl"
+		if [[ -n "${PVE_PORT:-}" ]]; then
+			shell_export PVE_PORT "$PVE_PORT"
+		fi
+	} > "$env_path"
+	chmod 600 "$env_path"
+
+	echo "installed: $target"
+}
+
+pve_host="$(prompt_value PVE_HOST "PVE host")"
+pve_user="$(prompt_value PVE_USER "PVE user")"
+pve_password="$(prompt_value PVE_PASSWORD "PVE password" true)"
+pve_verify_ssl="${PVE_VERIFY_SSL:-false}"
+
+installed=0
+for root in "$HOME/.claude" "$HOME/.codex" "$HOME/.opencode"; do
+	if [[ -d "$root" ]]; then
+		install_for "$root"
+		installed=$((installed + 1))
+	fi
+done
+
+if [[ "$installed" -eq 0 ]]; then
+	echo "no .claude, .codex, or .opencode directory found" >&2
+	exit 1
+fi
