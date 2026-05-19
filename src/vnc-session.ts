@@ -167,6 +167,15 @@ type HandshakeState =
 	| 'awaiting_server_init'
 	| 'connected'
 
+export interface DirtyRect {
+	x: number
+	y: number
+	w: number
+	h: number
+}
+
+const DIRTY_RECTS_CAP = 1024
+
 export class VncSession extends EventEmitter {
 	readonly node: string
 	readonly vmid: number
@@ -180,6 +189,7 @@ export class VncSession extends EventEmitter {
 	private supportsExtendedKey = false
 	private continuousUpdatesEnabled = false
 	private vncPassword: string = ''
+	private dirtyRects: DirtyRect[] = []
 
 	constructor(api: PveApiClient, options: VncSessionOptions) {
 		super()
@@ -346,7 +356,7 @@ export class VncSession extends EventEmitter {
 		const count = this.recvBuffer.readUInt8(0)
 
 		if (count === 0) {
-			// Server sent failure — next 4 bytes are reason length, then reason string
+			// Server sent failure - next 4 bytes are reason length, then reason string
 			if (this.recvBuffer.length < 5) return false
 			const reasonLen = this.recvBuffer.readUInt32BE(1)
 			if (this.recvBuffer.length < 5 + reasonLen) return false
@@ -452,13 +462,13 @@ export class VncSession extends EventEmitter {
 		)
 
 		// ContinuousUpdates is advertised in SetEncodings; the server confirms
-		// support via a pseudo-encoding rect — only then is EnableContinuousUpdates
+		// support via a pseudo-encoding rect - only then is EnableContinuousUpdates
 		// safe to send. We let the per-update incremental loop carry idle servers.
 		this.send(buildFbUpdateRequest(false, 0, 0, width, height))
 
 		this._connected = true
 		this.state = 'connected'
-		// connect() resolves after handshake — callers that need real pixels
+		// connect() resolves after handshake - callers that need real pixels
 		// should `await session.waitForUpdate(N, 0)` (seq===0 means no paint yet).
 		this.emit('_init_done', width, height)
 		return true
@@ -524,6 +534,7 @@ export class VncSession extends EventEmitter {
 					if (this.recvBuffer.length < offset + dataLen) return false
 					fb.applyRaw(x, y, w, h, this.recvBuffer.subarray(offset, offset + dataLen))
 					offset += dataLen
+					this.pushDirtyRect(x, y, w, h)
 					pixelsApplied = true
 					break
 				}
@@ -534,6 +545,7 @@ export class VncSession extends EventEmitter {
 					const srcY = this.recvBuffer.readUInt16BE(offset + 2)
 					fb.applyCopyRect(x, y, w, h, srcX, srcY)
 					offset += 4
+					this.pushDirtyRect(x, y, w, h)
 					pixelsApplied = true
 					break
 				}
@@ -544,6 +556,9 @@ export class VncSession extends EventEmitter {
 					if (this.continuousUpdatesEnabled) {
 						this.send(buildEnableContinuousUpdates(true, 0, 0, w, h))
 					}
+					// Resize blanks the framebuffer; the next paints will refill it.
+					// Mark the full new surface as dirty so callers re-OCR everything.
+					this.pushDirtyRect(0, 0, w, h)
 					pixelsApplied = true
 					break
 				}
@@ -584,7 +599,7 @@ export class VncSession extends EventEmitter {
 
 		this.recvBuffer = this.recvBuffer.subarray(offset)
 
-		// Fallback per-update incremental request — cheap, lets servers without
+		// Fallback per-update incremental request - cheap, lets servers without
 		// ContinuousUpdates still push deltas.
 		this.send(buildFbUpdateRequest(true, 0, 0, fb.width, fb.height))
 
@@ -781,9 +796,6 @@ export class VncSession extends EventEmitter {
 		this.sendPointerEvent(0, toX, toY)
 	}
 
-	/**
-	 * Request a fresh full framebuffer update.
-	 */
 	/** Send a non-incremental FB request. Returns the seq at the time of the send. */
 	requestFullUpdate(): number {
 		if (!this.framebuffer) return 0
@@ -794,6 +806,41 @@ export class VncSession extends EventEmitter {
 	/** Current monotonic paint counter (0 before first frame). */
 	get updateSeq(): number {
 		return this.framebuffer?.updateSeq ?? 0
+	}
+
+	/**
+	 * Return rectangles painted since the last consume call, then clear the
+	 * accumulator. Callers use this to OCR only the regions that actually
+	 * changed instead of the whole framebuffer.
+	 */
+	consumeDirtyRects(): DirtyRect[] {
+		const out = this.dirtyRects
+		this.dirtyRects = []
+		return out
+	}
+
+	private pushDirtyRect(x: number, y: number, w: number, h: number): void {
+		if (w <= 0 || h <= 0) return
+		if (this.dirtyRects.length < DIRTY_RECTS_CAP) {
+			this.dirtyRects.push({ x, y, w, h })
+			return
+		}
+		// Saturated: collapse to a single full-screen rect and stop appending
+		// until the caller consumes. Bounds memory if nobody is reading.
+		const fb = this.framebuffer
+		if (!fb) {
+			this.dirtyRects = []
+			return
+		}
+		if (
+			this.dirtyRects.length !== 1 ||
+			this.dirtyRects[0].x !== 0 ||
+			this.dirtyRects[0].y !== 0 ||
+			this.dirtyRects[0].w !== fb.width ||
+			this.dirtyRects[0].h !== fb.height
+		) {
+			this.dirtyRects = [{ x: 0, y: 0, w: fb.width, h: fb.height }]
+		}
 	}
 
 	/**
@@ -846,6 +893,7 @@ export class VncSession extends EventEmitter {
 		this.ws = null
 		this.recvBuffer = Buffer.alloc(0)
 		this.state = 'awaiting_version'
+		this.dirtyRects = []
 	}
 }
 
