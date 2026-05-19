@@ -1,6 +1,6 @@
 ---
 name: pve-vm
-description: Script Proxmox VE virtual machines from TypeScript — VM lifecycle, KVM (keyboard/mouse) via VNC, qemu-guest-agent, snapshots, screenshots. Use when automating tasks inside guest VMs that don't have an OS-level agent yet (BIOS, bootloader, installers, login screens) or when chaining KVM input with PVE-level operations.
+description: Script Proxmox VE virtual machines from TypeScript - VM lifecycle, KVM (keyboard/mouse) via VNC, qemu-guest-agent, snapshots, screenshots. Use when automating tasks inside guest VMs that don't have an OS-level agent yet (BIOS, bootloader, installers, login screens) or when chaining KVM input with PVE-level operations.
 ---
 
 # pve-vm
@@ -72,7 +72,7 @@ so it survives for the rest of the Claude/Codex/OpenCode session.
 
 ## Two ways to write flows
 
-**Imperative** — most scripts. Each call fires:
+**Imperative** - most scripts. Each call fires:
 
 ```ts
 const vm = pve.use(100)
@@ -81,7 +81,7 @@ await vm.kvm.click(800, 400)
 await vm.kvm.press('ctrl+s')
 ```
 
-**Declarative steps** — when you want a list of actions you can pass around,
+**Declarative steps** - when you want a list of actions you can pass around,
 schedule with absolute timing, or repeat. `act.*` returns plain data:
 
 ```ts
@@ -156,7 +156,7 @@ vm.guest.exec(cmd, args?, { timeoutMs? })   // -> { exitcode, stdout, stderr }
 
 vm.snapshot.list() / create(name, desc?) / delete(name) / rollback(name)
 
-// KVM — immediate
+// KVM - immediate
 vm.kvm.press('ctrl+alt+del')            // chord: down all, then up reverse
 vm.kvm.down('shift') / up('shift')      // tracked, auto-released
 vm.kvm.releaseAll()                     // panic button
@@ -190,11 +190,11 @@ table.
 
 ## When to use which strategy
 
-- **`vm.kvm.type` with `strategy: 'auto'`** (default) — fastest; uses Windows
+- **`vm.kvm.type` with `strategy: 'auto'`** (default) - fastest; uses Windows
   clipboard paste when the guest is Windows, VNC key events otherwise.
-- **`strategy: 'vnc'`** — needed for password fields, BIOS, and anything where
+- **`strategy: 'vnc'`** - needed for password fields, BIOS, and anything where
   clipboard isn't available.
-- **`vm.guest.exec`** — when guest-agent is up and you don't need to script the
+- **`vm.guest.exec`** - when guest-agent is up and you don't need to script the
   UI; this is the fastest, most reliable path.
 
 ## Guest shell helpers
@@ -232,7 +232,7 @@ quoting-sensitive commands.
 ## Screen matching (OCR + color)
 
 `vm.waitForScreen` polls the framebuffer until a text pattern, a color
-condition, or both, are satisfied — useful for waiting on dialogs, banners,
+condition, or both, are satisfied - useful for waiting on dialogs, banners,
 login screens, installer steps, anything without a programmatic signal.
 
 ```ts
@@ -242,7 +242,7 @@ await vm.waitForScreen({ text: /Welcome \w+/, timeoutMs: 30_000 })
 // substring is also fine
 await vm.waitForScreen({ text: 'Press any key' })
 
-// color: ≥50% of a region within 80% similarity of pure red
+// color: >=50% of a region within 80% similarity of pure red
 await vm.waitForScreen({
   color: { near: '#ff0000', threshold: 0.8, area: 0.5,
            region: { x: 0, y: 0, w: 200, h: 100 } },
@@ -257,7 +257,7 @@ await vm.waitForScreen({
 ```
 
 The result includes `matched`, the concatenated OCR `text`, the structured
-`items` (each `{ box, text, conf }`), and `matchedItem` — the specific block
+`items` (each `{ box, text, conf }`), and `matchedItem` - the specific block
 that satisfied the pattern. Use `matchedItem.box` to click whatever you just
 found:
 
@@ -268,7 +268,7 @@ await vm.kvm.click(Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2))
 ```
 
 OCR runs through rapidocr (PP-OCRv4 mobile via OpenVINO/ONNX). It reads small
-UI text reliably without region hints; ~1–2 s per 1280×800 frame warm, ~8 s
+UI text reliably without region hints; ~1-2 s per 1280x800 frame warm, ~8 s
 first-call worker boot (model load), ~700 MB RSS. Needs `uv` on PATH; the
 worker auto-installs `rapidocr` + `openvino` into a uv-managed env on first
 use. Set `PVE_OCR_DEBUG=1` to surface worker stderr.
@@ -276,7 +276,7 @@ use. Set `PVE_OCR_DEBUG=1` to surface worker stderr.
 ### Example: detect a Windows 10/11 login screen after reboot
 
 `match: 'any'` is the right pattern when several signals could appear: text or
-color, lock screen or login prompt, English or localized — any single hit
+color, lock screen or login prompt, English or localized - any single hit
 returns. Color check runs first and short-circuits OCR.
 
 ```ts
@@ -294,11 +294,11 @@ const r = await vm.waitForScreen({
 })
 
 if (r.matchedItem) {
-  // text fired — center the cursor on the matched block and click through.
+  // text fired - center the cursor on the matched block and click through.
   const [[x1, y1], , [x2, y2]] = r.matchedItem.box
   await vm.kvm.click((x1 + x2) >> 1, (y1 + y2) >> 1)
 } else {
-  // color fired (lock screen showing) — press a key to advance to login.
+  // color fired (lock screen showing) - press a key to advance to login.
   await vm.kvm.press('space')
 }
 ```
@@ -324,6 +324,26 @@ remapped back to source-image pixels, so `click(x, y)` works regardless of
 crop or scale. `refresh: false` skips the framebuffer kick when you've just
 acted and the screen hasn't moved.
 
+## Reference scripts
+
+Run from the repo root:
+
+```sh
+VMID=200 WIN_PASSWORD=... bun skill/references/kvm-windows-login.ts
+VMID=210 LINUX_PASSWORD=... bun skill/references/kvm-linux-login.ts
+VMID=200 bun skill/references/kvm-enter-bios.ts
+VMID=210 STOP_PATTERN='Not listed' MAX_MS=180000 bun skill/references/kvm-record-text.ts
+```
+
+- `kvm-windows-login.ts` - signs into the focused Windows account.
+- `kvm-linux-login.ts` - signs into a Debian/GDM greeter or lock screen.
+- `kvm-enter-bios.ts` - resets a VM, spams a firmware key, and opens setup.
+- `kvm-record-text.ts` - records OCR text to `transcript.txt`, `frames.jsonl`,
+  and `summary.txt`.
+
+`kvm-record-text.ts` writes OCR boxes in each JSONL frame as
+`items[].{ text, box, conf }`.
+
 ## Pitfalls
 
 - KVM commands need the VM running and the VNC connection to come up. First
@@ -333,4 +353,4 @@ acted and the screen hasn't moved.
 - `vm.reset()` is stop + start; for a soft reboot prefer
   `vm.guest.exec('reboot')` when the guest agent is available.
 - `pve.race` aborts the controller it manages. If you pass your own, the same
-  controller is aborted on resolution — share it across cooperating tasks.
+  controller is aborted on resolution - share it across cooperating tasks.
