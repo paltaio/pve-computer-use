@@ -91,6 +91,11 @@ const GUEST_EXEC_POLL_INITIAL_MS = 50
 const GUEST_EXEC_POLL_MAX_MS = 1000
 const DEFAULT_GUEST_EXEC_TIMEOUT_MS = 30_000
 
+function decodeGuestBytes(value?: string): string {
+	if (!value) return ''
+	return Buffer.from(value, 'latin1').toString('utf8')
+}
+
 function parseVmTags(tags?: string): string[] {
 	if (!tags) return []
 	return tags
@@ -452,12 +457,14 @@ export class PveApiClient {
 			)
 
 			if (raw.exited) {
-				const outRaw = raw['out-data'] ?? ''
-				const errRaw = raw['err-data'] ?? ''
+				// PVE base64-decodes out-data/err-data on the server but emits
+				// the resulting byte string into JSON as if it were latin1, so
+				// every UTF-8 byte arrives as its latin1 character. Round-trip
+				// through latin1 to recover the original bytes, then decode UTF-8.
 				return {
 					exitcode: raw.exitcode ?? -1,
-					stdout: outRaw,
-					stderr: errRaw,
+					stdout: decodeGuestBytes(raw['out-data']),
+					stderr: decodeGuestBytes(raw['err-data']),
 				}
 			}
 
