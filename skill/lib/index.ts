@@ -1,5 +1,5 @@
 /**
- * pve-vm skill — scriptable Proxmox VE KVM/guest-agent automation.
+ * pve-vm skill - scriptable Proxmox VE KVM/guest-agent automation.
  *
  * Default export is a lazy singleton initialised from PVE_HOST / PVE_USER /
  * PVE_PASSWORD / PVE_PORT / PVE_VERIFY_SSL on first use.
@@ -14,7 +14,12 @@ import { writeFile } from 'node:fs/promises'
 
 import { PveAuthManager, loadCredentialsFromEnv } from '../../src/pve-auth.js'
 import { PveApiClient } from '../../src/pve-api.js'
-import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../../src/vnc-session.js'
+import {
+	VncSessionManager,
+	type VncSession,
+	type EasingType,
+	type KeyboardLayout,
+} from '../../src/vnc-session.js'
 import { TerminalSessionManager } from '../../src/terminal-session.js'
 import { captureScreenshot } from '../../src/screenshot.js'
 import {
@@ -101,6 +106,21 @@ export interface ReadScreenResult {
 	/** Framebuffer dimensions at the time of capture. */
 	width: number
 	height: number
+}
+
+export interface ReadScreenIncrementalOptions {
+	/** Drop dirty rects smaller than this area (w*h). Default 100. */
+	minArea?: number
+	/** Integer nearest-neighbor upscale applied per region before OCR. Default 1. */
+	scale?: number
+	signal?: AbortSignal
+}
+
+export interface ReadScreenIncrementalResult extends ReadScreenResult {
+	/** Number of dirty regions OCRed in this call (0 when nothing changed). */
+	regionsOcrd: number
+	/** 1 when the call returned without OCR (nothing changed); 0 otherwise. */
+	framesSkipped: number
 }
 
 // ---------- Action descriptors (data, runnable by run/timeline) ----------
@@ -280,6 +300,7 @@ async function getSession(vmid: number, node?: string): Promise<VncSession> {
 
 export class Vm {
 	readonly id: number
+	private lastIncrementalSeq?: number
 
 	constructor(id: number) {
 		this.id = id
@@ -315,9 +336,7 @@ export class Vm {
 		await this.start()
 	}
 
-	async waitForScreen(
-		opts: ScreenMatchOptions & WaitForOptions,
-	): Promise<ScreenMatchResult> {
+	async waitForScreen(opts: ScreenMatchOptions & WaitForOptions): Promise<ScreenMatchResult> {
 		const timeoutMs = opts.timeoutMs ?? 30_000
 		const intervalMs = opts.intervalMs ?? 1_000
 		const deadline = Date.now() + timeoutMs
@@ -337,10 +356,10 @@ export class Vm {
 			}
 			if (Date.now() >= deadline) {
 				const items = last.items?.length ?? 0
-				const sample = last.text ? ` text: ${JSON.stringify(last.text.replace(/\s+/g, ' ').slice(0, 160))}` : ''
-				throw new Error(
-					`waitForScreen timed out after ${timeoutMs}ms (${items} items).${sample}`,
-				)
+				const sample = last.text
+					? ` text: ${JSON.stringify(last.text.replace(/\s+/g, ' ').slice(0, 160))}`
+					: ''
+				throw new Error(`waitForScreen timed out after ${timeoutMs}ms (${items} items).${sample}`)
 			}
 			// Force a non-incremental refresh, then wait either for the next
 			// paint or the poll interval. ContinuousUpdates handles changing
@@ -362,7 +381,7 @@ export class Vm {
 	 * to click, rather than polling for a known string with `waitForScreen`.
 	 *
 	 * Each item's `box` is a quadrilateral [[x,y],[x,y],[x,y],[x,y]] in
-	 * source-image pixels — compute its centroid to feed `kvm.click(x, y)`.
+	 * source-image pixels - compute its centroid to feed `kvm.click(x, y)`.
 	 */
 	async readScreen(opts: ReadScreenOptions = {}): Promise<ReadScreenResult> {
 		const session = await getSession(this.id)
@@ -378,22 +397,100 @@ export class Vm {
 		const region: Region = opts.region ?? { x: 0, y: 0, w: snap.width, h: snap.height }
 		const jpeg = regionToJpeg(snap, region, 85, scale)
 		const ocr = await ocrImage(jpeg, opts.signal)
-		// If the caller passed a region or scale, item coordinates are in the
-		// cropped/upscaled space. Map them back to source-image pixels so
-		// agents can click without doing the math.
-		const items = ocr.items.map((it) => ({
-			...it,
-			box: it.box.map(([x, y]) => [
-				region.x + x / scale,
-				region.y + y / scale,
-			]) as [number, number][],
-		}))
 		return {
 			text: ocr.text,
-			items,
+			items: translateOcrItems(ocr.items, region, scale),
 			ms: ocr.ms,
 			width: snap.width,
 			height: snap.height,
+		}
+	}
+
+	/**
+	 * OCR only the regions of the framebuffer painted since the previous call.
+	 *
+	 * First call after the session opens reads the whole screen so the caller
+	 * sees everything already on screen. Subsequent calls consume the dirty-
+	 * rect accumulator and OCR each region concurrently through the OCR pool.
+	 * When nothing has changed, returns immediately with `framesSkipped: 1`.
+	 */
+	async readScreenIncremental(
+		opts: ReadScreenIncrementalOptions = {},
+	): Promise<ReadScreenIncrementalResult> {
+		const session = await getSession(this.id)
+		opts.signal?.throwIfAborted()
+		if (!session.screen) throw new Error('framebuffer not ready')
+
+		const scale = opts.scale ?? 1
+		const minArea = opts.minArea ?? 100
+
+		const fb = session.screen
+		const rects = session.consumeDirtyRects()
+
+		// First call after session open: nothing to compare against. OCR the
+		// whole screen so the caller's dedup state is seeded with everything
+		// currently visible.
+		if (this.lastIncrementalSeq === undefined) {
+			const snap = fb.snapshot()
+			this.lastIncrementalSeq = snap.seq
+			const region: Region = { x: 0, y: 0, w: snap.width, h: snap.height }
+			const jpeg = regionToJpeg(snap, region, 85, scale)
+			const ocr = await ocrImage(jpeg, opts.signal)
+			return {
+				text: ocr.text,
+				items: translateOcrItems(ocr.items, region, scale),
+				ms: ocr.ms,
+				width: snap.width,
+				height: snap.height,
+				regionsOcrd: 1,
+				framesSkipped: 0,
+			}
+		}
+
+		if (rects.length === 0 && fb.updateSeq === this.lastIncrementalSeq) {
+			return {
+				text: '',
+				items: [],
+				ms: 0,
+				width: fb.width,
+				height: fb.height,
+				regionsOcrd: 0,
+				framesSkipped: 1,
+			}
+		}
+
+		const snap = fb.snapshot()
+		this.lastIncrementalSeq = snap.seq
+
+		const filtered = rects.filter((r) => r.w * r.h >= minArea)
+		if (filtered.length === 0) {
+			return {
+				text: '',
+				items: [],
+				ms: 0,
+				width: snap.width,
+				height: snap.height,
+				regionsOcrd: 0,
+				framesSkipped: 1,
+			}
+		}
+
+		// Coalesce dirty rects into a single OCR region to bound per-frame work.
+		const region = expandOcrRegion(
+			unionRects(filtered, snap.width, snap.height),
+			snap.width,
+			snap.height,
+		)
+		const jpeg = regionToJpeg(snap, region, 85, scale)
+		const ocr = await ocrImage(jpeg, opts.signal)
+		return {
+			text: ocr.text,
+			items: translateOcrItems(ocr.items, region, scale),
+			ms: ocr.ms,
+			width: snap.width,
+			height: snap.height,
+			regionsOcrd: filtered.length,
+			framesSkipped: 0,
 		}
 	}
 
@@ -406,7 +503,9 @@ export class Vm {
 			const cur = await this.status()
 			if (cur.status === state) return
 			if (Date.now() >= deadline) {
-				throw new Error(`VM ${this.id} did not reach state '${state}' within ${timeoutMs}ms (last: ${cur.status})`)
+				throw new Error(
+					`VM ${this.id} did not reach state '${state}' within ${timeoutMs}ms (last: ${cur.status})`,
+				)
 			}
 			await sleep(intervalMs)
 		}
@@ -449,7 +548,7 @@ export class Vm {
 		},
 	}
 
-	// Screenshot — saves to disk if path given, otherwise returns Buffer
+	// Screenshot - saves to disk if path given, otherwise returns Buffer
 	async screenshot(): Promise<Buffer>
 	async screenshot(path: string, quality?: number): Promise<void>
 	async screenshot(path?: string, quality = 85): Promise<Buffer | void> {
@@ -469,7 +568,7 @@ export class Vm {
 		return buf
 	}
 
-	// KVM — immediate
+	// KVM - immediate
 	kvm = {
 		press: async (combo: string): Promise<void> => {
 			const session = await getSession(this.id)
@@ -521,7 +620,12 @@ export class Vm {
 				state.pointer = { x, y }
 			}
 		},
-		click: async (x: number, y: number, button: MouseButton = 'left', holdMs = 0): Promise<void> => {
+		click: async (
+			x: number,
+			y: number,
+			button: MouseButton = 'left',
+			holdMs = 0,
+		): Promise<void> => {
 			const session = await getSession(this.id)
 			const state = getHeld(this.id)
 			const bit = mouseButtonToBit(button)
@@ -579,7 +683,10 @@ export class Vm {
 			const state = getHeld(this.id)
 			state.pointer = { x, y }
 		},
-		path: async (points: [number, number][], opts: Omit<MoveOptions, 'from'> = {}): Promise<void> => {
+		path: async (
+			points: [number, number][],
+			opts: Omit<MoveOptions, 'from'> = {},
+		): Promise<void> => {
 			if (points.length === 0) return
 			const session = await getSession(this.id)
 			const state = getHeld(this.id)
@@ -709,6 +816,40 @@ async function runStep(vm: Vm, step: Step, signal?: AbortSignal): Promise<void> 
 	}
 }
 
+function unionRects(rects: Region[], maxW: number, maxH: number): Region {
+	let x1 = rects[0].x
+	let y1 = rects[0].y
+	let x2 = rects[0].x + rects[0].w
+	let y2 = rects[0].y + rects[0].h
+	for (let i = 1; i < rects.length; i++) {
+		const r = rects[i]
+		if (r.x < x1) x1 = r.x
+		if (r.y < y1) y1 = r.y
+		if (r.x + r.w > x2) x2 = r.x + r.w
+		if (r.y + r.h > y2) y2 = r.y + r.h
+	}
+	if (x1 < 0) x1 = 0
+	if (y1 < 0) y1 = 0
+	if (x2 > maxW) x2 = maxW
+	if (y2 > maxH) y2 = maxH
+	return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) }
+}
+
+function expandOcrRegion(r: Region, maxW: number, maxH: number): Region {
+	if (r.h > maxH / 2) return r
+	const y1 = Math.max(0, r.y - 24)
+	const y2 = Math.min(maxH, r.y + r.h + 24)
+	return { x: 0, y: y1, w: maxW, h: y2 - y1 }
+}
+
+function translateOcrItems(items: OcrItem[], region: Region, scale: number): OcrItem[] {
+	if (scale === 1 && region.x === 0 && region.y === 0) return items
+	return items.map((it) => ({
+		...it,
+		box: it.box.map(([x, y]) => [region.x + x / scale, region.y + y / scale]) as [number, number][],
+	}))
+}
+
 // ---------- Mouse animation ----------
 
 const EASINGS: Record<EasingType, (t: number) => number> = {
@@ -809,7 +950,7 @@ const pve = {
 		await rt.ensure()
 		return rt.api!.listVms()
 	},
-	/** Sleep — convenient for ad-hoc scripts. */
+	/** Sleep - convenient for ad-hoc scripts. */
 	wait: sleep,
 	/** Parallel: resolve when all resolve, reject on first error. */
 	all,
@@ -818,7 +959,7 @@ const pve = {
 	 * so cooperating tasks can stop themselves.
 	 */
 	race,
-	/** Explicit init (rarely needed — first call auto-initialises). */
+	/** Explicit init (rarely needed - first call auto-initialises). */
 	async connect() {
 		await rt.ensure()
 	},
