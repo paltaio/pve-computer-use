@@ -2,6 +2,12 @@
 
 MCP server for Proxmox VE VMs. Screenshot and input over VNC, text I/O over serial console, plus power, snapshots, backups, and guest-agent exec.
 
+## Skill install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/paltaio/pve-computer-use/main/install-pve-skill | bash
+```
+
 ## Requirements
 
 - Proxmox VE 8+
@@ -108,7 +114,7 @@ Debian/Ubuntu guest: `systemctl enable --now serial-getty@ttyS0.service`. For bo
 
 ## Security
 
-VNC tickets are VM-scoped and expire in ~40s. Auth tickets refresh before their 2h expiry; 403s trigger a retry with a fresh ticket. Credentials come from env vars only. Runs as a local stdio subprocess — no network exposure of the MCP server itself.
+VNC tickets are VM-scoped and expire in ~40s. Auth tickets refresh before their 2h expiry; 403s trigger a retry with a fresh ticket. Credentials come from env vars only. Runs as a local stdio subprocess - no network exposure of the MCP server itself.
 
 ## Troubleshooting
 
