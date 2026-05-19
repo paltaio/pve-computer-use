@@ -36,11 +36,16 @@ interface PendingRequest {
 	signal?: AbortSignal
 }
 
-class RapidOcrClient {
+export class RapidOcrClient {
+	readonly id: number
 	private proc: ChildProcessWithoutNullStreams | null = null
 	private ready: Promise<void> | null = null
 	private queue: PendingRequest[] = []
 	private stdoutBuf = ''
+
+	constructor(id = 0) {
+		this.id = id
+	}
 
 	async ensureStarted(): Promise<void> {
 		if (this.ready) return this.ready
@@ -73,9 +78,10 @@ class RapidOcrClient {
 			}
 		})
 
-		// Stderr is purely diagnostic — drop it unless DEBUG is set.
+		// Stderr is purely diagnostic - drop it unless DEBUG is set.
+		const tag = `[rapidocr#${this.id}]`
 		child.stderr.on('data', (d: Buffer) => {
-			if (process.env.PVE_OCR_DEBUG) process.stderr.write(`[rapidocr] ${d}`)
+			if (process.env.PVE_OCR_DEBUG) process.stderr.write(`${tag} ${d}`)
 		})
 
 		// EPIPE on stdin (worker died mid-write) is reported via the exit handler
@@ -232,18 +238,4 @@ function locateServerScript(): string {
 	]
 	for (const c of candidates) if (existsSync(c)) return c
 	throw new Error(`rapidocr_server.py not found (looked in: ${candidates.join(', ')})`)
-}
-
-let singleton: RapidOcrClient | null = null
-
-export function getRapidOcrClient(): RapidOcrClient {
-	if (!singleton) singleton = new RapidOcrClient()
-	return singleton
-}
-
-export async function shutdownRapidOcr(): Promise<void> {
-	if (singleton) {
-		await singleton.shutdown()
-		singleton = null
-	}
 }
