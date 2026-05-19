@@ -4,13 +4,13 @@
  * PVE Computer Use MCP Server
  *
  * MCP server that lets AI agents see and control Proxmox VE virtual machine
- * displays via VNC. Screenshot, click, type, scroll — computer use for VMs.
+ * displays via VNC. Screenshot, click, type, scroll - computer use for VMs.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
-import { PveAuthManager, loadCredentialsFromEnv } from './pve-auth.js'
+import { PveAuthManager, loadCredentials } from './pve-auth.js'
 import { PveApiClient } from './pve-api.js'
 import { VncSessionManager } from './vnc-session.js'
 import { TerminalSessionManager } from './terminal-session.js'
@@ -35,7 +35,7 @@ registerSnapshotTools(server)
 registerSerialTools(server)
 
 async function main(): Promise<void> {
-	const credentials = loadCredentialsFromEnv()
+	const credentials = loadCredentials()
 	const auth = new PveAuthManager(credentials)
 	const api = new PveApiClient(auth)
 	const sessions = new VncSessionManager(api)

@@ -12,7 +12,7 @@
 
 import { writeFile } from 'node:fs/promises'
 
-import { PveAuthManager, loadCredentialsFromEnv } from '../../src/pve-auth.js'
+import { PveAuthManager, loadCredentials, type PveCredentialInput } from '../../src/pve-auth.js'
 import { PveApiClient } from '../../src/pve-api.js'
 import {
 	VncSessionManager,
@@ -214,8 +214,14 @@ class Runtime {
 	sessions?: VncSessionManager
 	terms?: TerminalSessionManager
 	private initPromise?: Promise<void>
+	private credentials?: PveCredentialInput
 	private cleanupInstalled = false
 	private disposed = false
+
+	configure(credentials: PveCredentialInput): void {
+		if (this.api) throw new Error('PVE runtime is already connected')
+		this.credentials = credentials
+	}
 
 	async ensure(): Promise<void> {
 		if (this.api) return
@@ -224,7 +230,7 @@ class Runtime {
 	}
 
 	private async init(): Promise<void> {
-		const auth = new PveAuthManager(loadCredentialsFromEnv())
+		const auth = new PveAuthManager(loadCredentials(this.credentials))
 		await auth.authenticate()
 		const api = new PveApiClient(auth)
 		this.auth = auth
@@ -944,6 +950,9 @@ const pve = {
 	/** Return a bound handle. Does not connect; first KVM call connects on demand. */
 	use(vmid: number): Vm {
 		return new Vm(vmid)
+	},
+	configure(credentials: PveCredentialInput): void {
+		rt.configure(credentials)
 	},
 	/** List all VMs across the cluster. */
 	async list() {

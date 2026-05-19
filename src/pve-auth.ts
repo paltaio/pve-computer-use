@@ -3,12 +3,24 @@
  *
  * Handles ticket-based authentication against the Proxmox VE API.
  * API tokens cannot be used for WebSocket endpoints (VNC),
- * so we must use username+password → ticket auth flow.
+ * so we must use username+password ticket auth flow.
  *
  * Tickets expire in 2 hours. We auto-refresh at ~1 hour.
  */
 
 import { httpRequest } from './http.js'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export interface PveCredentialInput {
+	host?: string
+	user?: string
+	port?: number
+	username?: string
+	password?: string
+	verifySsl?: boolean
+}
 
 export interface PveCredentials {
 	host: string
@@ -24,23 +36,59 @@ export interface PveTicket {
 	expiresAt: number
 }
 
-export function loadCredentialsFromEnv(): PveCredentials {
-	const host = process.env.PVE_HOST
-	if (!host) throw new Error('PVE_HOST environment variable is required')
-
-	const username = process.env.PVE_USER
-	if (!username) throw new Error('PVE_USER environment variable is required')
-
-	const password = process.env.PVE_PASSWORD
-	if (!password) throw new Error('PVE_PASSWORD environment variable is required')
+export function loadCredentials(input: PveCredentialInput = {}): PveCredentials {
+	const fileEnv = loadCredentialFile()
+	const host = input.host ?? process.env.PVE_HOST ?? fileEnv.PVE_HOST
+	const username = input.username ?? input.user ?? process.env.PVE_USER ?? fileEnv.PVE_USER
+	const password = input.password ?? process.env.PVE_PASSWORD ?? fileEnv.PVE_PASSWORD
+	const port = input.port ?? Number(process.env.PVE_PORT ?? fileEnv.PVE_PORT ?? 8006)
+	const verifySsl =
+		input.verifySsl ?? (process.env.PVE_VERIFY_SSL ?? fileEnv.PVE_VERIFY_SSL) !== 'false'
 
 	return {
-		host,
-		port: parseInt(process.env.PVE_PORT ?? '8006', 10),
-		username,
-		password,
-		verifySsl: process.env.PVE_VERIFY_SSL !== 'false',
+		host: requiredValue('PVE_HOST', host),
+		port: Number.isFinite(port) ? port : 8006,
+		username: requiredValue('PVE_USER', username),
+		password: requiredValue('PVE_PASSWORD', password),
+		verifySsl,
 	}
+}
+
+function requiredValue(name: string, value: string | undefined): string {
+	if (value) return value
+	throw new Error(`${name} is required.${credentialHint()}`)
+}
+
+function credentialHint(): string {
+	const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'pve.env')
+	if (existsSync(envPath)) {
+		return `\nProvide config, set PVE_HOST/PVE_USER/PVE_PASSWORD, or fix ${envPath}.`
+	}
+	return '\nProvide config or set PVE_HOST, PVE_USER, and PVE_PASSWORD.'
+}
+
+function loadCredentialFile(): Record<string, string> {
+	const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'pve.env')
+	if (!existsSync(envPath)) return {}
+	const out: Record<string, string> = {}
+	for (const rawLine of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+		const line = rawLine.trim()
+		if (!line || line.startsWith('#')) continue
+		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line)
+		if (!match) continue
+		out[match[1]] = parseEnvValue(match[2].trim())
+	}
+	return out
+}
+
+function parseEnvValue(value: string): string {
+	if (value.startsWith("'") && value.endsWith("'")) {
+		return value.slice(1, -1).replace(/'\\''/g, "'")
+	}
+	if (value.startsWith('"') && value.endsWith('"')) {
+		return value.slice(1, -1).replace(/\\(["\\$`])/g, '$1')
+	}
+	return value
 }
 
 export class PveAuthManager {
