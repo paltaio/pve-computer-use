@@ -24,7 +24,7 @@ Write a script and run it with bun:
 
 ```ts
 // scripts/install-foo.ts
-import pve, { act } from '<absolute-path-to-repo>/skill/index.ts'
+import pve, { act } from '<absolute-path-to-repo>/skill/lib/index.ts'
 
 const vm = pve.use(204)
 if ((await vm.status()).status !== 'running') await vm.start()
@@ -51,14 +51,14 @@ exit, so an interrupted script never leaves stuck modifiers.
 Prefer inline `bun -e` for one-shots; don't litter `/tmp` for three lines:
 
 ```sh
-NODE_TLS_REJECT_UNAUTHORIZED=0 bun -e 'import pve from "<absolute-path-to-repo>/skill/index.ts"; const v = pve.use(100); console.log(await v.status()); await pve.disconnect()'
+NODE_TLS_REJECT_UNAUTHORIZED=0 bun -e 'import pve from "<absolute-path-to-repo>/skill/lib/index.ts"; const v = pve.use(100); console.log(await v.status()); await pve.disconnect()'
 ```
 
 Multi-line one-shots: heredoc into `bun -`:
 
 ```sh
 NODE_TLS_REJECT_UNAUTHORIZED=0 bun - <<'EOF'
-import pve from '<absolute-path-to-repo>/skill/index.ts'
+import pve from '<absolute-path-to-repo>/skill/lib/index.ts'
 const vm = pve.use(100)
 await vm.kvm.press('ctrl+alt+t')
 await pve.disconnect()
@@ -85,7 +85,7 @@ await vm.kvm.press('ctrl+s')
 schedule with absolute timing, or repeat. `act.*` returns plain data:
 
 ```ts
-import pve, { act } from '<absolute-path-to-repo>/skill/index.ts'
+import pve, { act } from '<absolute-path-to-repo>/skill/lib/index.ts'
 const vm = pve.use(100)
 
 await vm.run([
@@ -196,6 +196,38 @@ table.
   clipboard isn't available.
 - **`vm.guest.exec`** — when guest-agent is up and you don't need to script the
   UI; this is the fastest, most reliable path.
+
+## Guest shell helpers
+
+`skill/lib/` ships thin wrappers around `vm.guest.exec` for the patterns that
+repeat in every script: PowerShell without quoting hell, shell one-liners,
+file write/read, downloads. Import per-OS:
+
+```ts
+import pve, { windows, linux, darwin } from '<absolute-path-to-repo>/skill/lib/index.ts'
+const vm = pve.use(100)
+
+// Windows: encoded PowerShell sidesteps cmd/PS quoting entirely
+await windows.ps(vm, '$PSVersionTable.PSVersion | ConvertTo-Json')
+await windows.cmd(vm, 'ipconfig /all')
+await windows.writeFile(vm, 'C:\\temp\\config.json', JSON.stringify(cfg))
+await windows.download(vm, 'https://example.com/x.zip', 'C:\\temp\\x.zip')
+const user = await windows.activeUser(vm)
+
+// Linux
+await linux.sh(vm, 'systemctl status sshd')
+await linux.systemctl(vm, 'restart', 'sshd')
+await linux.writeFile(vm, '/etc/foo.conf', body, { sudo: true, mode: '0644' })
+
+// macOS
+await darwin.sh(vm, 'sw_vers')
+await darwin.osascript(vm, 'tell application "Finder" to activate')
+```
+
+Each module exports `ExecResult` (`{ exitcode, stdout, stderr }`), an escape
+helper (`psEscape` / `shEscape`), and a `writeFile`/`readFile`/`download`/
+`reboot`/`shutdown`. Use these instead of hand-rolling `vm.guest.exec(...)` for
+quoting-sensitive commands.
 
 ## Screen matching (OCR + color)
 

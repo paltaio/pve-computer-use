@@ -4,7 +4,7 @@
  * Default export is a lazy singleton initialised from PVE_HOST / PVE_USER /
  * PVE_PASSWORD / PVE_PORT / PVE_VERIFY_SSL on first use.
  *
- *   import pve, { act } from '<absolute-path-to-repo>/skill/index.ts'
+ *   import pve, { act } from '<absolute-path-to-repo>/skill/lib/index.ts'
  *   const vm = pve.use(100)
  *   await vm.start()
  *   await vm.kvm.press('ctrl+alt+t')
@@ -12,23 +12,23 @@
 
 import { writeFile } from 'node:fs/promises'
 
-import { PveAuthManager, loadCredentialsFromEnv } from '../src/pve-auth.js'
-import { PveApiClient } from '../src/pve-api.js'
-import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../src/vnc-session.js'
-import { TerminalSessionManager } from '../src/terminal-session.js'
-import { captureScreenshot } from '../src/screenshot.js'
+import { PveAuthManager, loadCredentialsFromEnv } from '../../src/pve-auth.js'
+import { PveApiClient } from '../../src/pve-api.js'
+import { VncSessionManager, type VncSession, type EasingType, type KeyboardLayout } from '../../src/vnc-session.js'
+import { TerminalSessionManager } from '../../src/terminal-session.js'
+import { captureScreenshot } from '../../src/screenshot.js'
 import {
 	matchScreen,
 	regionToJpeg,
 	type Region,
 	type ScreenMatchOptions,
 	type ScreenMatchResult,
-} from '../src/screen-match.js'
-import { isWindowsGuest, typeTextWindowsClipboard } from '../src/windows-guest.js'
-import { parseKeyCombo } from '../src/rfb.js'
-import { mouseButtonToBit, sleep } from '../src/helpers.js'
-import { destroyDispatchers } from '../src/http.js'
-import { ocrImage, shutdownOcr, type OcrItem } from '../src/ocr.js'
+} from '../../src/screen-match.js'
+import { isWindowsGuest, typeTextWindowsClipboard } from '../../src/windows-guest.js'
+import { parseKeyCombo } from '../../src/rfb.js'
+import { mouseButtonToBit, sleep } from '../../src/helpers.js'
+import { destroyDispatchers } from '../../src/http.js'
+import { ocrImage, shutdownOcr, type OcrItem } from '../../src/ocr.js'
 
 export type { Region, OcrItem }
 
@@ -337,10 +337,9 @@ export class Vm {
 			}
 			if (Date.now() >= deadline) {
 				const items = last.items?.length ?? 0
-				const backend = last.backend ?? 'no-frame'
 				const sample = last.text ? ` text: ${JSON.stringify(last.text.replace(/\s+/g, ' ').slice(0, 160))}` : ''
 				throw new Error(
-					`waitForScreen timed out after ${timeoutMs}ms (${items} items via ${backend}).${sample}`,
+					`waitForScreen timed out after ${timeoutMs}ms (${items} items).${sample}`,
 				)
 			}
 			// Force a non-incremental refresh, then wait either for the next
@@ -833,3 +832,7 @@ const pve = {
 }
 
 export default pve
+
+export * as windows from './windows.js'
+export * as linux from './linux.js'
+export * as darwin from './darwin.js'
