@@ -13,7 +13,7 @@
 import { writeFile } from 'node:fs/promises'
 
 import { PveAuthManager, loadCredentials, type PveCredentialInput } from '../../src/pve-auth.js'
-import { PveApiClient } from '../../src/pve-api.js'
+import { PveApiClient, type VmConfig } from '../../src/pve-api.js'
 import {
 	VncSessionManager,
 	type VncSession,
@@ -317,6 +317,22 @@ export class Vm {
 		await rt.ensure()
 		const node = await rt.api!.findVmNode(this.id)
 		return rt.api!.getVmStatus(node, this.id)
+	}
+
+	async config(): Promise<VmConfig> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		return rt.api!.getVmConfig(node, this.id)
+	}
+
+	async notes(): Promise<string> {
+		return (await this.config()).description ?? ''
+	}
+
+	async setNotes(notes: string): Promise<void> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		await rt.api!.setVmNotes(node, this.id, notes)
 	}
 
 	async start(): Promise<void> {

@@ -9,6 +9,15 @@ TypeScript skill for driving Proxmox VE VMs. Wraps the same primitives as the
 `pve-computer-use` MCP server but exposes them as a plain library so an agent
 can compose flows in code.
 
+## Read VM notes first
+
+```ts
+const vm = pve.use(200)
+await vm.notes()      // string - Proxmox UI "Notes" panel
+await vm.config()     // { name, description, tags, disks }
+await vm.setNotes('') // clear notes or overwrite with new text
+```
+
 ## Quickstart
 
 Set credentials once in the shell:
@@ -143,6 +152,8 @@ pve.race(tasks, controller?)            // resolves first, aborts rest
 
 // vm = pve.use(vmid)
 vm.status()                             // { status, name, qmpstatus }
+vm.config()                             // { name, description, tags, disks }
+vm.notes() / vm.setNotes(text)          // Proxmox UI "Notes" panel - read first
 vm.start() / vm.shutdown() / vm.stop() / vm.reset()
 vm.waitFor('running' | 'stopped' | ..., { timeoutMs, intervalMs, signal })
 vm.screenshot()                         // -> Buffer (JPEG)
