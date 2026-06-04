@@ -144,17 +144,21 @@ await vm.timeline([
 // Singleton
 pve.list()                              // VmStatus[] across cluster
 pve.use(vmid)                           // -> Vm handle (does not connect)
+pve.create(vmid, config, { node, start? }) // -> Vm handle
 pve.wait(ms)
 pve.connect()                           // explicit init (auto otherwise)
 pve.disconnect()                        // tear down sessions
+pve.task.wait(node, upid, timeoutMs?)
 pve.all(tasks)
 pve.race(tasks, controller?)            // resolves first, aborts rest
 
 // vm = pve.use(vmid)
 vm.status()                             // { status, name, qmpstatus }
 vm.config()                             // { name, description, tags, disks }
+vm.config.set(config, deleteKeys?)
+vm.config.delete(key | keys)
 vm.notes() / vm.setNotes(text)          // Proxmox UI "Notes" panel - read first
-vm.start() / vm.shutdown() / vm.stop() / vm.reset()
+vm.start() / vm.shutdown() / vm.stop() / vm.reset() / vm.delete(options?)
 vm.waitFor('running' | 'stopped' | ..., { timeoutMs, intervalMs, signal })
 vm.screenshot()                         // -> Buffer (JPEG)
 vm.screenshot('out.jpg', quality?)      // saves, returns void
@@ -165,7 +169,18 @@ vm.disconnectVnc()
 
 vm.guest.exec(cmd, args?, { timeoutMs? })   // -> { exitcode, stdout, stderr }
 
-vm.snapshot.list() / create(name, desc?) / delete(name) / rollback(name)
+vm.serial.connect({ node?, cols?, rows? })
+vm.serial.read({ waitMs? }) / send(text) / key(combo) / resize(cols, rows) / disconnect()
+
+vm.disk.list() / set(key, spec) / delete(key | keys)
+
+vm.backup.list(storage)
+vm.backup.create({ storage?, compress?, mode?, notes? }) // -> UPID after completion
+
+vm.snapshot.list()
+vm.snapshot.create(name, descOrOptions?)
+vm.snapshot.ensure(name, options?)
+vm.snapshot.delete(name) / rollback(name)
 
 // KVM - immediate
 vm.kvm.press('ctrl+alt+del')            // chord: down all, then up reverse

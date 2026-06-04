@@ -13,7 +13,15 @@
 import { writeFile } from 'node:fs/promises'
 
 import { PveAuthManager, loadCredentials, type PveCredentialInput } from '../../src/pve-auth.js'
-import { PveApiClient, type VmConfig } from '../../src/pve-api.js'
+import {
+	PveApiClient,
+	type BackupVolume,
+	type DeleteVmOptions,
+	type PveConfig,
+	type Snapshot,
+	type VmConfig,
+} from '../../src/pve-api.js'
+import type { VmDiskEntry } from '../../src/pve-disk-config.js'
 import {
 	VncSessionManager,
 	type VncSession,
@@ -121,6 +129,33 @@ export interface ReadScreenIncrementalResult extends ReadScreenResult {
 	regionsOcrd: number
 	/** 1 when the call returned without OCR (nothing changed); 0 otherwise. */
 	framesSkipped: number
+}
+
+export interface CreateVmOptions {
+	node: string
+	start?: boolean
+}
+
+export interface SnapshotCreateOptions {
+	description?: string
+	vmstate?: boolean
+}
+
+export interface BackupCreateOptions {
+	storage?: string
+	compress?: '0' | 'gzip' | 'lzo' | 'zstd'
+	mode?: 'snapshot' | 'stop' | 'suspend'
+	notes?: string
+}
+
+export interface SerialConnectOptions {
+	node?: string
+	cols?: number
+	rows?: number
+}
+
+export interface SerialReadOptions {
+	waitMs?: number
 }
 
 // ---------- Action descriptors (data, runnable by run/timeline) ----------
@@ -302,6 +337,16 @@ async function getSession(vmid: number, node?: string): Promise<VncSession> {
 	return mgr.connect(vmid, node)
 }
 
+async function getTerminal(vmid: number, opts: SerialConnectOptions = {}) {
+	await rt.ensure()
+	const mgr = rt.terms!
+	try {
+		return mgr.getConnectedSession(vmid)
+	} catch {
+		return mgr.connect(vmid, opts.node, opts.cols, opts.rows)
+	}
+}
+
 // ---------- Vm handle ----------
 
 export class Vm {
@@ -312,17 +357,32 @@ export class Vm {
 		this.id = id
 	}
 
+	config = Object.assign(
+		async (): Promise<VmConfig> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.getVmConfig(node, this.id)
+		},
+		{
+			set: async (config: PveConfig, deleteKeys: string[] = []): Promise<void> => {
+				await rt.ensure()
+				const node = await rt.api!.findVmNode(this.id)
+				await rt.api!.updateVmConfigValues(node, this.id, config, deleteKeys)
+			},
+			delete: async (keys: string | string[]): Promise<void> => {
+				await rt.ensure()
+				const node = await rt.api!.findVmNode(this.id)
+				const deleteKeys = Array.isArray(keys) ? keys : [keys]
+				await rt.api!.updateVmConfigValues(node, this.id, {}, deleteKeys)
+			},
+		},
+	)
+
 	// Lifecycle
 	async status(): Promise<{ status: string; name?: string; qmpstatus?: string }> {
 		await rt.ensure()
 		const node = await rt.api!.findVmNode(this.id)
 		return rt.api!.getVmStatus(node, this.id)
-	}
-
-	async config(): Promise<VmConfig> {
-		await rt.ensure()
-		const node = await rt.api!.findVmNode(this.id)
-		return rt.api!.getVmConfig(node, this.id)
 	}
 
 	async notes(): Promise<string> {
@@ -351,6 +411,12 @@ export class Vm {
 		await rt.ensure()
 		const node = await rt.api!.findVmNode(this.id)
 		await rt.api!.stopVm(node, this.id)
+	}
+
+	async delete(options: DeleteVmOptions = {}): Promise<void> {
+		await rt.ensure()
+		const node = await rt.api!.findVmNode(this.id)
+		await rt.api!.deleteVm(node, this.id, options)
 	}
 
 	async reset(): Promise<void> {
@@ -546,17 +612,90 @@ export class Vm {
 		},
 	}
 
+	serial = {
+		connect: async (opts: SerialConnectOptions = {}): Promise<void> => {
+			await getTerminal(this.id, opts)
+		},
+		read: async (opts: SerialReadOptions = {}): Promise<string> => {
+			const session = await getTerminal(this.id)
+			await session.waitForData(opts.waitMs ?? 500)
+			return session.getScreen()
+		},
+		send: async (text: string): Promise<void> => {
+			const session = await getTerminal(this.id)
+			session.sendInput(text)
+		},
+		key: async (combo: string): Promise<void> => {
+			const session = await getTerminal(this.id)
+			session.sendKey(combo)
+		},
+		resize: async (cols: number, rows: number): Promise<void> => {
+			const session = await getTerminal(this.id)
+			session.resize(cols, rows)
+		},
+		disconnect: async (): Promise<void> => {
+			await rt.ensure()
+			rt.terms!.disconnect(this.id)
+		},
+	}
+
+	disk = {
+		list: async (): Promise<VmDiskEntry[]> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.getVmDiskConfig(node, this.id)
+		},
+		set: async (key: string, spec: string): Promise<void> => {
+			await this.config.set({ [key]: spec })
+		},
+		delete: async (keys: string | string[]): Promise<void> => {
+			await this.config.delete(keys)
+		},
+	}
+
+	backup = {
+		list: async (storage: string): Promise<BackupVolume[]> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.listBackups(node, storage, this.id)
+		},
+		create: async (opts: BackupCreateOptions = {}): Promise<string> => {
+			await rt.ensure()
+			const node = await rt.api!.findVmNode(this.id)
+			return rt.api!.createBackup(
+				node,
+				this.id,
+				opts.storage,
+				opts.compress ?? 'zstd',
+				opts.mode ?? 'snapshot',
+				opts.notes,
+			)
+		},
+	}
+
 	// Snapshots
 	snapshot = {
-		list: async () => {
+		list: async (): Promise<Snapshot[]> => {
 			await rt.ensure()
 			const node = await rt.api!.findVmNode(this.id)
 			return rt.api!.listSnapshots(node, this.id)
 		},
-		create: async (name: string, description?: string): Promise<void> => {
+		create: async (
+			name: string,
+			descriptionOrOptions?: string | SnapshotCreateOptions,
+		): Promise<void> => {
 			await rt.ensure()
 			const node = await rt.api!.findVmNode(this.id)
-			await rt.api!.createSnapshot(node, this.id, name, description)
+			const opts =
+				typeof descriptionOrOptions === 'string'
+					? { description: descriptionOrOptions }
+					: (descriptionOrOptions ?? {})
+			await rt.api!.createSnapshot(node, this.id, name, opts.description, opts.vmstate)
+		},
+		ensure: async (name: string, opts: SnapshotCreateOptions = {}): Promise<void> => {
+			const snapshots = await this.snapshot.list()
+			if (snapshots.some((snapshot) => snapshot.name === name)) return
+			await this.snapshot.create(name, opts)
 		},
 		delete: async (name: string): Promise<void> => {
 			await rt.ensure()
@@ -967,6 +1106,12 @@ const pve = {
 	use(vmid: number): Vm {
 		return new Vm(vmid)
 	},
+	async create(vmid: number, config: PveConfig, opts: CreateVmOptions): Promise<Vm> {
+		await rt.ensure()
+		await rt.api!.createVm(opts.node, vmid, config)
+		if (opts.start) await rt.api!.startVm(opts.node, vmid)
+		return new Vm(vmid)
+	},
 	configure(credentials: PveCredentialInput): void {
 		rt.configure(credentials)
 	},
@@ -991,6 +1136,12 @@ const pve = {
 	/** Tear down all sessions and HTTP pools. */
 	async disconnect() {
 		await rt.disconnect()
+	},
+	task: {
+		wait: async (node: string, upid: string, timeoutMs?: number): Promise<void> => {
+			await rt.ensure()
+			await rt.api!.waitForTask(node, upid, timeoutMs)
+		},
 	},
 	get api() {
 		return rt.api
