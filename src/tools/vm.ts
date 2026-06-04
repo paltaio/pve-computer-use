@@ -2,8 +2,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { api } from '../state.js'
+import type { PveConfig } from '../pve-api.js'
 import { formatVmTags, matchesVmFilters } from '../helpers.js'
 import { GUIDANCE_TOPICS, guidanceTopicIds, guidanceTopicUri, readGuidance } from '../guidance.js'
+
+const pveConfigValueSchema = z.union([z.string(), z.number(), z.boolean()])
+const pveConfigSchema = z.record(z.string().min(1), pveConfigValueSchema)
 
 export function registerVmTools(server: McpServer): void {
 	server.registerTool(
@@ -174,6 +178,125 @@ export function registerVmTools(server: McpServer): void {
 					{
 						type: 'text' as const,
 						text: `VM ${vmid}: status=${status.status}, qmpstatus=${status.qmpstatus ?? 'n/a'}, name=${status.name ?? config.name ?? 'unknown'}, tags=${formatVmTags(config.tags)}`,
+					},
+				],
+			}
+		},
+	)
+
+	server.registerTool(
+		'vm_create',
+		{
+			title: 'Create VM',
+			description:
+				'Create a QEMU VM on a PVE node. Requires VM.Allocate on /vms/{vmid} and matching VM.Config privileges for the provided options.',
+			inputSchema: {
+				node: z.string().min(1).describe('PVE node name where the VM will be created.'),
+				vmid: z.number().int().positive().describe('VM ID'),
+				config: pveConfigSchema
+					.default({})
+					.describe(
+						'Raw Proxmox QEMU create options, excluding node and vmid. Examples: name, memory, cores, net0, scsi0, ide2, ostype, agent, tags.',
+					),
+				start: z.boolean().default(false).describe('Start the VM after creation.'),
+			},
+		},
+		async ({ node, vmid, config, start }) => {
+			await api.createVm(node, vmid, config as PveConfig)
+			if (start) {
+				await api.startVm(node, vmid)
+			}
+
+			return {
+				content: [
+					{
+						type: 'text' as const,
+						text: `VM ${vmid} created on node ${node}${start ? ' and started' : ''}`,
+					},
+				],
+			}
+		},
+	)
+
+	server.registerTool(
+		'vm_config_set',
+		{
+			title: 'Set VM Config',
+			description:
+				'Set one or more raw Proxmox QEMU config entries. Requires the matching VM.Config privileges for the provided options.',
+			inputSchema: {
+				vmid: z.number().int().positive().describe('VM ID'),
+				config: pveConfigSchema
+					.default({})
+					.describe(
+						'Raw Proxmox QEMU config options to set. Examples: memory, cores, net0, scsi0, boot, agent, tags.',
+					),
+				delete: z
+					.array(z.string().min(1))
+					.optional()
+					.describe('Optional config keys to delete in the same update.'),
+				node: z.string().optional().describe('PVE node name. Auto-detected if omitted.'),
+			},
+		},
+		async ({ vmid, config, delete: deleteKeys, node }) => {
+			const resolvedNode = node ?? (await api.findVmNode(vmid))
+			await api.updateVmConfigValues(resolvedNode, vmid, config as PveConfig, deleteKeys)
+
+			const setKeys = Object.keys(config)
+			const removedKeys = deleteKeys?.map((key) => key.trim()).filter((key) => key.length > 0) ?? []
+			const parts: string[] = []
+			if (setKeys.length > 0) parts.push(`set ${setKeys.join(', ')}`)
+			if (removedKeys.length > 0) parts.push(`deleted ${removedKeys.join(', ')}`)
+
+			return {
+				content: [
+					{
+						type: 'text' as const,
+						text: `VM ${vmid} config updated on node ${resolvedNode}: ${parts.join('; ')}`,
+					},
+				],
+			}
+		},
+	)
+
+	server.registerTool(
+		'vm_delete',
+		{
+			title: 'Delete VM',
+			description:
+				'Delete a QEMU VM and its owned volumes through the Proxmox API. Requires VM.Allocate privilege.',
+			inputSchema: {
+				vmid: z.number().int().positive().describe('VM ID'),
+				purge: z
+					.boolean()
+					.default(false)
+					.describe(
+						'Remove VMID from related configurations such as backup jobs, replication, and HA.',
+					),
+				destroy_unreferenced_disks: z
+					.boolean()
+					.default(false)
+					.describe('Destroy unreferenced disks with the same VMID from enabled storages.'),
+				skiplock: z
+					.boolean()
+					.default(false)
+					.describe('Ignore VM locks. Proxmox only allows root to use this option.'),
+				node: z.string().optional().describe('PVE node name. Auto-detected if omitted.'),
+			},
+		},
+		async ({ vmid, purge, destroy_unreferenced_disks, skiplock, node }) => {
+			const resolvedNode = node ?? (await api.findVmNode(vmid))
+			await api.deleteVm(resolvedNode, vmid, {
+				purge,
+				destroyUnreferencedDisks: destroy_unreferenced_disks,
+				skiplock,
+			})
+
+			return {
+				content: [
+					{
+						type: 'text' as const,
+						text: `VM ${vmid} deleted on node ${resolvedNode}`,
 					},
 				],
 			}

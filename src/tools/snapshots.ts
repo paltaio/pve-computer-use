@@ -36,7 +36,7 @@ export function registerSnapshotTools(server: McpServer): void {
 				const time = s.snaptime ? new Date(s.snaptime * 1000).toISOString() : 'n/a'
 				const desc = s.description ?? ''
 				const mem = s.vmstate ? ' [+memory]' : ''
-				return `  ${s.name} — ${time}${mem}${desc ? ` — ${desc}` : ''}`
+				return `  ${s.name} - ${time}${mem}${desc ? ` - ${desc}` : ''}`
 			})
 
 			return {
@@ -199,7 +199,7 @@ export function registerSnapshotTools(server: McpServer): void {
 				const time = new Date(b.ctime * 1000).toISOString()
 				const sizeMb = (b.size / 1024 / 1024).toFixed(1)
 				const prot = b.protected ? ' [protected]' : ''
-				return `  ${b.volid} — ${time} — ${sizeMb} MB${prot}${b.notes ? ` — ${b.notes}` : ''}`
+				return `  ${b.volid} - ${time} - ${sizeMb} MB${prot}${b.notes ? ` - ${b.notes}` : ''}`
 			})
 
 			return {

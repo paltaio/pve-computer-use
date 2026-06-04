@@ -38,7 +38,7 @@ export class Framebuffer {
 		return this._height
 	}
 
-	/** Live buffer — racy across await boundaries. Prefer `snapshot()` for reads. */
+	/** Live buffer - racy across await boundaries. Prefer `snapshot()` for reads. */
 	get buffer(): Buffer {
 		return this._buffer
 	}

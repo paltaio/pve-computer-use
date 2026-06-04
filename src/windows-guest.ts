@@ -125,7 +125,7 @@ export interface InteractiveUserActionOptions {
  *
  * Sends a single PowerShell orchestrator that resolves the console user,
  * creates the interactive schtasks entry, runs it, optionally waits for
- * completion, and deletes the task — all inside the guest. If `setupFile`
+ * completion, and deletes the task - all inside the guest. If `setupFile`
  * is provided, the same orchestrator writes and deletes it in try/finally,
  * so the entire operation stays as one host↔guest round trip.
  */
@@ -241,7 +241,7 @@ function buildOrchestratorScript(params: {
  * wscript.exe is a Windows-subsystem binary (no console attached). Its
  * WScript.Shell.Run with windowStyle=0 launches the child process with
  * SW_HIDE set from process creation, so no console/window ever becomes
- * foreground — avoiding the blur/focus event burst that
+ * foreground - avoiding the blur/focus event burst that
  * `powershell -WindowStyle Hidden` triggers on web forms.
  */
 function buildHiddenVbsLauncher(command: string, waitForChild: boolean): string {

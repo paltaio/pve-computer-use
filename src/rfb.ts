@@ -2,7 +2,7 @@
  * RFB (Remote Framebuffer) Protocol Constants and Helpers
  *
  * Implements the subset of RFB 3.8 needed for PVE VNC:
- * - Security type 1 (None) — PVE authenticates via ticket
+ * - Security type 1 (None) - PVE authenticates via ticket
  * - RAW + CopyRect encodings
  * - DesktopSize pseudo-encoding
  * - KeyEvent, PointerEvent, FramebufferUpdateRequest

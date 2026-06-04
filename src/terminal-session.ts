@@ -5,7 +5,7 @@
  * Uses @xterm/headless for terminal state emulation and @xterm/addon-serialize
  * for reading the screen as plain text.
  *
- * Unlike VNC, terminal WebSocket is raw bidirectional text — no RFB handshake.
+ * Unlike VNC, terminal WebSocket is raw bidirectional text - no RFB handshake.
  */
 
 import WebSocket from 'ws'
@@ -89,7 +89,7 @@ function keyComboToSequence(combo: string): string {
 	const seq = KEY_SEQUENCES[normalized]
 	if (seq) return seq
 
-	// Single character — send as-is
+	// Single character - send as-is
 	if (normalized.length === 1) return normalized
 
 	throw new Error(

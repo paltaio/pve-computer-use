@@ -42,7 +42,7 @@ export interface ColorMatch {
 export interface TextMatch {
 	pattern: string | RegExp
 	/**
-	 * Optional region hint. rapidocr usually doesn't need one — every detected
+	 * Optional region hint. rapidocr usually doesn't need one - every detected
 	 * text block on the full screen is checked individually.
 	 */
 	region?: Region
@@ -173,7 +173,7 @@ export async function matchScreen(
 	const checks: boolean[] = []
 	const result: ScreenMatchResult = { matched: false }
 
-	// Snapshot the live framebuffer if the caller passed one — incoming VNC
+	// Snapshot the live framebuffer if the caller passed one - incoming VNC
 	// updates mutate fb.buffer in place and awaits would tear the frame.
 	// Callers that pass a FramebufferSnapshot skip the copy.
 	const snap: FramebufferSnapshot = isLiveFramebuffer(fb) ? fb.snapshot() : fb

@@ -87,6 +87,15 @@ export interface GuestExecResult {
 	stderr: string
 }
 
+export type PveConfigValue = string | number | boolean
+export type PveConfig = Record<string, PveConfigValue>
+
+export interface DeleteVmOptions {
+	purge?: boolean
+	destroyUnreferencedDisks?: boolean
+	skiplock?: boolean
+}
+
 const GUEST_EXEC_POLL_INITIAL_MS = 50
 const GUEST_EXEC_POLL_MAX_MS = 1000
 const DEFAULT_GUEST_EXEC_TIMEOUT_MS = 30_000
@@ -120,6 +129,19 @@ function normalizeVmConfig(config: RawVmConfig): VmConfig {
 	}
 }
 
+function encodePveConfigValue(value: PveConfigValue): string {
+	if (typeof value === 'boolean') return value ? '1' : '0'
+	return String(value)
+}
+
+function encodePveConfig(config: PveConfig): Record<string, string> {
+	const body: Record<string, string> = {}
+	for (const [key, value] of Object.entries(config)) {
+		body[key] = encodePveConfigValue(value)
+	}
+	return body
+}
+
 export class PveApiClient {
 	constructor(private auth: PveAuthManager) {}
 
@@ -131,7 +153,7 @@ export class PveApiClient {
 	): Promise<T> {
 		const resp = await this.doRequest(method, path, body, extraHeaders)
 
-		// On 403, force a fresh ticket and retry once — permissions may have changed
+		// On 403, force a fresh ticket and retry once - permissions may have changed
 		if (resp.status === 403) {
 			await this.auth.forceRefresh()
 			const retry = await this.doRequest(method, path, body, extraHeaders)
@@ -222,7 +244,7 @@ export class PveApiClient {
 
 	/**
 	 * Get the WebSocket URL for terminal connection.
-	 * Uses the same vncwebsocket endpoint as VNC — PVE reuses it for terminal proxy.
+	 * Uses the same vncwebsocket endpoint as VNC - PVE reuses it for terminal proxy.
 	 */
 	getTermWebSocketUrl(node: string, vmid: number, port: string, vncticket: string): string {
 		const encodedTicket = encodeURIComponent(vncticket)
@@ -249,12 +271,40 @@ export class PveApiClient {
 		return normalizeVmConfig(config)
 	}
 
+	async createVm(node: string, vmid: number, config: PveConfig = {}): Promise<string> {
+		const body = encodePveConfig(config)
+		body.vmid = String(vmid)
+
+		const upid = await this.request<string>('POST', `/nodes/${node}/qemu`, body)
+		await this.waitForTask(node, upid)
+		return upid
+	}
+
 	async updateVmConfig(
 		node: string,
 		vmid: number,
 		body: Record<string, string> | URLSearchParams,
 	): Promise<void> {
 		await this.request<null>('PUT', `/nodes/${node}/qemu/${vmid}/config`, body)
+	}
+
+	async updateVmConfigValues(
+		node: string,
+		vmid: number,
+		config: PveConfig,
+		deleteKeys: string[] = [],
+	): Promise<void> {
+		const body = encodePveConfig(config)
+		const normalizedDelete = deleteKeys.map((key) => key.trim()).filter((key) => key.length > 0)
+		if (normalizedDelete.length > 0) {
+			body.delete = normalizedDelete.join(',')
+		}
+
+		if (Object.keys(body).length === 0) {
+			throw new Error('No VM config changes provided')
+		}
+
+		await this.updateVmConfig(node, vmid, body)
 	}
 
 	async setVmConfigValue(node: string, vmid: number, key: string, value: string): Promise<void> {
@@ -294,6 +344,21 @@ export class PveApiClient {
 
 	async shutdownVm(node: string, vmid: number): Promise<string> {
 		const upid = await this.request<string>('POST', `/nodes/${node}/qemu/${vmid}/status/shutdown`)
+		await this.waitForTask(node, upid)
+		return upid
+	}
+
+	async deleteVm(node: string, vmid: number, options: DeleteVmOptions = {}): Promise<string> {
+		const params = new URLSearchParams()
+		if (options.purge) params.set('purge', '1')
+		if (options.destroyUnreferencedDisks) params.set('destroy-unreferenced-disks', '1')
+		if (options.skiplock) params.set('skiplock', '1')
+
+		const query = params.toString()
+		const upid = await this.request<string>(
+			'DELETE',
+			`/nodes/${node}/qemu/${vmid}${query ? `?${query}` : ''}`,
+		)
 		await this.waitForTask(node, upid)
 		return upid
 	}

@@ -73,7 +73,7 @@ MCP client config (`~/.claude/mcp_servers.json` or `claude_desktop_config.json`)
 
 **Serial console:** `serial_connect`, `serial_disconnect`, `serial_read`, `serial_send`, `serial_key`, `serial_resize`
 
-**VM management:** `list_vms`, `vm_start`, `vm_shutdown`, `vm_stop`, `vm_status`, `vm_notes`, `vm_disk_list`, `vm_disk_set`, `vm_config_delete`, `exec_command`, `timeline`
+**VM management:** `list_vms`, `vm_create`, `vm_delete`, `vm_start`, `vm_shutdown`, `vm_stop`, `vm_status`, `vm_notes`, `vm_disk_list`, `vm_disk_set`, `vm_config_set`, `vm_config_delete`, `exec_command`, `timeline`
 
 **Snapshots:** `snapshot_list`, `snapshot_create`, `snapshot_delete`, `snapshot_rollback`
 
@@ -89,7 +89,7 @@ pveum user add mcp-agent@pve --password <password>
 
 # Role (full: screen + power + snapshots + backups + guest agent)
 pveum role add MCPComputerUseFull \
-  --privs "VM.Console,VM.Audit,VM.PowerMgmt,VM.GuestAgent.Unrestricted,VM.Snapshot,VM.Backup,Datastore.Audit,Datastore.AllocateSpace"
+  --privs "VM.Console,VM.Audit,VM.Allocate,VM.PowerMgmt,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.GuestAgent.Unrestricted,VM.Snapshot,VM.Backup,Datastore.Audit,Datastore.AllocateSpace"
 
 # ACLs (per VM or pool, plus storage for backups)
 pveum acl modify /vms/100   --users mcp-agent@pve --roles MCPComputerUseFull
@@ -100,7 +100,9 @@ pveum acl modify /storage   --users mcp-agent@pve --roles MCPComputerUseFull
 | --------------------------------------------- | --------------------------------------- |
 | `VM.Console`                                  | VNC + serial                            |
 | `VM.Audit`                                    | status, list, snapshot list             |
+| `VM.Allocate`                                 | create and delete VM                    |
 | `VM.PowerMgmt`                                | start / stop / shutdown                 |
+| `VM.Config.*`                                 | create and edit VM config               |
 | `VM.Snapshot`                                 | snapshot ops                            |
 | `VM.Backup`                                   | backup ops (per VM)                     |
 | `VM.GuestAgent.Unrestricted`                  | `exec_command` (needs qemu-guest-agent) |
