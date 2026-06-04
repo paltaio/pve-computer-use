@@ -89,11 +89,20 @@ pveum user add mcp-agent@pve --password <password>
 
 # Role (full: screen + power + snapshots + backups + guest agent)
 pveum role add MCPComputerUseFull \
-  --privs "VM.Console,VM.Audit,VM.Allocate,VM.PowerMgmt,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.GuestAgent.Unrestricted,VM.Snapshot,VM.Backup,Datastore.Audit,Datastore.AllocateSpace"
+  --privs "VM.Console,VM.Audit,VM.Allocate,VM.Clone,VM.PowerMgmt,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.GuestAgent.Unrestricted,VM.Snapshot,VM.Backup,Datastore.Audit,Datastore.AllocateSpace"
 
 # ACLs (per VM or pool, plus storage for backups)
 pveum acl modify /vms/100   --users mcp-agent@pve --roles MCPComputerUseFull
 pveum acl modify /storage   --users mcp-agent@pve --roles MCPComputerUseFull
+```
+
+Full permissions mode:
+
+```bash
+pveum role modify MCPComputerUseFull \
+  --privs "VM.Allocate,VM.Clone,VM.Audit,VM.Console,VM.PowerMgmt,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.GuestAgent.Unrestricted,VM.Snapshot,VM.Backup,Datastore.Audit,Datastore.AllocateSpace"
+
+pveum acl modify / --users mcp-agent@pve --roles MCPComputerUseFull
 ```
 
 | Privilege                                     | For                                     |
