@@ -33,7 +33,7 @@ export interface ColorMatch {
 	 * Internally: 1 - rgbDistance/maxDistance.
 	 */
 	threshold?: number
-	/** Min fraction of region pixels that must match (0..1). Default 0.01 (≥1%). */
+	/** Min fraction of region pixels that must match (0..1). Default 0.01 (>=1%). */
 	area?: number
 	/** Restrict color search to this region. */
 	region?: Region
@@ -41,6 +41,11 @@ export interface ColorMatch {
 
 export interface TextMatch {
 	pattern: string | RegExp
+	/**
+	 * Optional fuzzy threshold for string patterns, 0..1. If omitted, string
+	 * patterns use exact substring matching and RegExp patterns use RegExp.test.
+	 */
+	threshold?: number
 	/**
 	 * Optional region hint. rapidocr usually doesn't need one - every detected
 	 * text block on the full screen is checked individually.
@@ -65,6 +70,8 @@ export interface ScreenMatchResult {
 	items?: OcrItem[]
 	/** The specific text block that satisfied the pattern, if any. */
 	matchedItem?: OcrItem
+	/** Best fuzzy text score observed, if a text threshold was used. */
+	textScore?: number
 	colorRatio?: number
 }
 
@@ -81,6 +88,10 @@ function normalizeText(t: TextMatch | string | RegExp): TextMatch {
 	return t
 }
 
+function normalizeComparableText(text: string): string {
+	return text.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function clampRegion(fb: FbLike, r?: Region): Region {
 	if (!r) return { x: 0, y: 0, w: fb.width, h: fb.height }
 	const x = Math.max(0, Math.min(fb.width - 1, r.x | 0))
@@ -95,7 +106,7 @@ export function colorRatio(fb: FbLike, opts: ColorMatch): number {
 	if (fb.width === 0 || fb.height === 0) return 0
 	const [tr, tg, tb] = parseColor(opts.near)
 	const threshold = opts.threshold ?? 0.9
-	// Per-channel tolerance: threshold=1 → exact match, threshold=0 → any colour.
+	// Per-channel tolerance: threshold=1 is exact, threshold=0 allows any colour.
 	// At 0.9, each R/G/B channel may drift up to ~25 units. Chebyshev distance,
 	// which is more intuitive than Euclidean for "how close is this to my color".
 	const tol = Math.round((1 - threshold) * 255)
@@ -156,11 +167,77 @@ export function regionToJpeg(fb: FbLike, r: Region, quality = 85, scale = 1): Bu
 	return encodeJpeg({ data: out, width: outW, height: outH }, quality).data
 }
 
-function testPattern(pattern: string | RegExp, text: string): boolean {
-	if (typeof pattern === 'string') return text.includes(pattern)
+function levenshteinDistance(a: string, b: string): number {
+	if (a === b) return 0
+	if (a.length === 0) return b.length
+	if (b.length === 0) return a.length
+
+	let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+	let curr = new Array<number>(b.length + 1)
+
+	for (let i = 1; i <= a.length; i++) {
+		curr[0] = i
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1
+			curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+		}
+		const tmp = prev
+		prev = curr
+		curr = tmp
+	}
+
+	return prev[b.length]
+}
+
+function similarity(a: string, b: string): number {
+	const maxLen = Math.max(a.length, b.length)
+	if (maxLen === 0) return 1
+	return 1 - levenshteinDistance(a, b) / maxLen
+}
+
+function fuzzySubstringScore(pattern: string, text: string): number {
+	const needle = normalizeComparableText(pattern)
+	const haystack = normalizeComparableText(text)
+	if (needle.length === 0) return haystack.length === 0 ? 1 : 0
+	if (haystack.includes(needle)) return 1
+	if (haystack.length === 0) return 0
+	if (haystack.length <= needle.length) return similarity(needle, haystack)
+
+	const minLen = Math.max(1, Math.floor(needle.length * 0.6))
+	const maxLen = Math.min(haystack.length, Math.ceil(needle.length * 1.4))
+	let best = 0
+
+	for (let start = 0; start < haystack.length; start++) {
+		for (let len = minLen; len <= maxLen && start + len <= haystack.length; len++) {
+			best = Math.max(best, similarity(needle, haystack.slice(start, start + len)))
+			if (best === 1) return best
+		}
+	}
+
+	return best
+}
+
+export interface TextMatchOutcome {
+	matched: boolean
+	score?: number
+}
+
+export function matchText(tm: TextMatch, text: string): TextMatchOutcome {
+	if (tm.threshold !== undefined) {
+		if (typeof tm.pattern !== 'string') {
+			throw new Error('Text threshold is only supported for string patterns')
+		}
+		if (!Number.isFinite(tm.threshold) || tm.threshold < 0 || tm.threshold > 1) {
+			throw new Error('Text threshold must be between 0 and 1')
+		}
+		const score = fuzzySubstringScore(tm.pattern, text)
+		return { matched: score >= tm.threshold, score }
+	}
+
+	if (typeof tm.pattern === 'string') return { matched: text.includes(tm.pattern) }
 	// Reset lastIndex so /g and /y flags don't desync across calls.
-	pattern.lastIndex = 0
-	return pattern.test(text)
+	tm.pattern.lastIndex = 0
+	return { matched: tm.pattern.test(text) }
 }
 
 /** Run text/color checks against a framebuffer snapshot. */
@@ -203,13 +280,23 @@ export async function matchScreen(
 
 		let ok = false
 		for (const it of ocr.items) {
-			if (testPattern(tm.pattern, it.text)) {
+			const matched = matchText(tm, it.text)
+			if (matched.score !== undefined) {
+				result.textScore = Math.max(result.textScore ?? 0, matched.score)
+			}
+			if (matched.matched) {
 				ok = true
 				result.matchedItem = it
 				break
 			}
 		}
-		if (!ok) ok = testPattern(tm.pattern, ocr.text)
+		if (!ok) {
+			const matched = matchText(tm, ocr.text)
+			if (matched.score !== undefined) {
+				result.textScore = Math.max(result.textScore ?? 0, matched.score)
+			}
+			ok = matched.matched
+		}
 		checks.push(ok)
 	}
 

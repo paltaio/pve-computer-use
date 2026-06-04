@@ -242,6 +242,9 @@ await vm.waitForScreen({ text: /Welcome \w+/, timeoutMs: 30_000 })
 // substring is also fine
 await vm.waitForScreen({ text: 'Press any key' })
 
+// fuzzy string match for OCR drift
+await vm.waitForScreen({ text: { pattern: 'Password', threshold: 0.8 } })
+
 // color: >=50% of a region within 80% similarity of pure red
 await vm.waitForScreen({
   color: { near: '#ff0000', threshold: 0.8, area: 0.5,
@@ -260,6 +263,10 @@ The result includes `matched`, the concatenated OCR `text`, the structured
 `items` (each `{ box, text, conf }`), and `matchedItem` - the specific block
 that satisfied the pattern. Use `matchedItem.box` to click whatever you just
 found:
+
+String and RegExp text patterns are exact by default. Add `threshold` only for
+fuzzy string matching; it uses a 0..1 similarity score and records the best
+score in `textScore`.
 
 ```ts
 const r = await vm.waitForScreen({ text: 'OK' })
